@@ -1,5 +1,5 @@
 [package]
-name = "phylax-cache"
+name = "phylaxis-cache"
 description = "redb-backed result cache keyed by sha256 + ruleset version."
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-phylax-core.workspace = true
+phylaxis-core.workspace = true
 redb.workspace = true
 sha2.workspace = true
 serde.workspace = true

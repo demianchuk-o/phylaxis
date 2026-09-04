@@ -1,5 +1,5 @@
 [package]
-name = "phylax-graph"
+name = "phylaxis-graph"
 description = "Call graph, data-flow graph and source-to-sink reachability."
 version.workspace = true
 edition.workspace = true
@@ -7,6 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-phylax-core.workspace = true
+phylaxis-core.workspace = true
 petgraph.workspace = true
 thiserror.workspace = true

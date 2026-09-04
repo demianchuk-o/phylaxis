@@ -1,4 +1,4 @@
-# phylax — project overview
+# phylaxis — project overview
 
 Orientation for any agent, and in particular for the first architecture session. Read
 together with CLAUDE.md.
@@ -77,6 +77,19 @@ Key = `sha256` of the package file + ruleset version. PyPI files are immutable (
 distribution filename is never reassigned), so the result for a `sha256` is cached
 indefinitely; changing the rules increments their version and invalidates old entries.
 Storage: `redb`.
+
+## Distribution
+
+The tool is delivered as a **prebuilt wheel on PyPI** (`pip install phylaxis`), giving both
+an importable module and a console command. The rationale is practical: the users and the
+CI pipelines that would adopt such a scanner are already in the Python ecosystem, and the
+evaluation harness over the Datadog and Backstabber datasets is far easier to script in
+Python than around a foreign binary. Built with maturin and PyO3 under the abi3 stable ABI,
+so one wheel per platform serves every CPython ≥ 3.9.
+
+This is a claim to "practical value" that the thesis can actually demonstrate, rather than
+assert: an installable artefact plus a CI integration is more convincing than a repository
+of source.
 
 ## Roadmap (phases)
 

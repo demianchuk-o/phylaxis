@@ -1,4 +1,12 @@
 /target/
+
+# Python build artefacts. Wheels are built by CI, never committed.
+/dist/
+__pycache__/
+*.pyc
+*.so
+*.pyd
+.venv/
 **/*.rs.bk
 
 # Snapshot review leftovers from `insta`
@@ -8,7 +16,7 @@
 # by script, never committed.
 /datasets/
 /out/
-/.phylax-cache/
+/.phylaxis-cache/
 
 # Editor / OS noise
 .vscode/

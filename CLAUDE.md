@@ -1,9 +1,10 @@
-# CLAUDE.md — phylax
+# CLAUDE.md — phylaxis
 
-> Working name `phylax` (Greek, "guardian"). Rename freely — change the line below and the
-> crate names.
+> Name: **phylaxis**, from Greek φύλαξις — "a guarding, a watching". (The shorter φύλαξ,
+> *phylax* = "guard", was the earlier working name but is already taken on PyPI.) The
+> distribution ships under this name on PyPI, so it is now fixed, not a working title.
 >
-> **phylax** is a deterministic static analyser that detects malicious Python packages on
+> **phylaxis** is a deterministic static analyser that detects malicious Python packages on
 > PyPI by the data-flow and call graph inside a package. Written in Rust.
 > Master's thesis project. Rust is being learned along the way — explain non-obvious decisions.
 
@@ -39,20 +40,20 @@ References (read as needed): @docs/ARCHITECTURE.md, @docs/DECISIONS.md, @docs/RU
 
 ## Repository layout — two halves, two repositories
 
-This directory (`phylax/`) is the **code repository, and it stays code-only.**
+This directory (`phylaxis/`) is the **code repository, and it stays code-only.**
 
 The thesis lives in a sibling directory with its own separate git repository:
 
 ```
 dep-graph-analyzer/          plain container folder, not a repository
-├── phylax/    [git]         THIS repo — code only
+├── phylaxis/    [git]         THIS repo — code only
 └── thesis/    [git]         separate repo — thesis text, research material, notes
 ```
 
 The bridge rule, in both directions:
 
 - Code never imports from, or writes into, `../thesis/`.
-- Thesis sessions never read raw Rust. They read `phylax/docs/*.md` and
+- Thesis sessions never read raw Rust. They read `phylaxis/docs/*.md` and
   `../thesis/notes/*.md` only.
 
 That bridge is what makes it possible to write the thesis later without pulling thousands
@@ -124,12 +125,34 @@ crates/
   rules     — sources / sinks / capabilities per the taxonomy; the rule engine
   cache     — redb; key = sha256 + ruleset_version
   fetch     — downloading packages from PyPI (optional feature)
-  cli       — clap; orchestration; output (json / sarif)
+  cli       — clap; orchestration; output (json / sarif). A LIBRARY plus a thin binary:
+              both the native binary and the Python console script call `run()`.
+  py        — PyO3 bindings; built into the wheel by maturin. Marshalling only, no logic.
 docs/       — ARCHITECTURE.md, DECISIONS.md, RULES.md, EVALUATION.md, RESULTS.md,
               PROGRESS.md (living documents)
 fixtures/   — small sample packages: benign/ and malicious/ (for tests)
 tests/      — integration tests
+python/     — thin importable shim over the compiled module (`phylaxis/__init__.py`)
+pyproject.toml — maturin build backend; the wheel's metadata
 ```
+
+## Distribution
+
+The tool ships **as a prebuilt wheel on PyPI**: `pip install phylaxis` must give both an
+importable `phylaxis` module and a `phylaxis` console command. Its audience already lives
+in the Python ecosystem, and the evaluation harness over the labelled datasets is easier to
+drive from Python than from a foreign binary.
+
+- Built by `maturin`, PyO3 with **abi3** (`abi3-py39`), so one wheel per platform covers
+  every CPython ≥ 3.9 instead of one per interpreter version.
+- `cargo` stays the build tool for development; `maturin build` is only for releases.
+- Because of this, CLI logic must live in `crates/cli/src/lib.rs`, never in `main.rs` —
+  the binary and the Python entry point must run the same code path.
+
+Note for the thesis: the tool is distributed as a compiled artefact while invariant 2 puts
+compiled extensions out of *analysis* scope. That is consistent — the scope statement is
+about what phylaxis reads, not about how phylaxis is shipped — but it is exactly the kind
+of thing worth pre-empting in writing, since a reviewer may well ask.
 
 ---
 

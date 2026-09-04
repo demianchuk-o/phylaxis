@@ -1,0 +1,18 @@
+[package]
+name = "phylaxis-py"
+description = "Python bindings. Built into a wheel by maturin; not used by the native CLI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "_native"
+# cdylib is what Python can dlopen. rlib is kept so the crate still takes part in
+# a plain `cargo check --workspace`.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+phylaxis-core.workspace = true
+phylaxis-cli.workspace = true
+pyo3.workspace = true

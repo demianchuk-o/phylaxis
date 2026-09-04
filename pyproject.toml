@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "phylaxis"
+description = "Deterministic static analysis that detects malicious Python packages by source-to-sink reachability."
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["security", "supply-chain", "static-analysis", "pypi", "malware"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Security",
+]
+# Version comes from crates/py/Cargo.toml so that the crate and the wheel can
+# never drift apart.
+dynamic = ["version"]
+
+[project.scripts]
+phylaxis = "phylaxis.__main__:main"
+
+[tool.maturin]
+manifest-path = "crates/py/Cargo.toml"
+python-source = "python"
+module-name = "phylaxis._native"
+features = ["pyo3/extension-module"]
+strip = true

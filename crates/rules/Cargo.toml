@@ -1,5 +1,5 @@
 [package]
-name = "phylax-rules"
+name = "phylaxis-rules"
 description = "Source/sink/capability catalogue and the rule engine."
 version.workspace = true
 edition.workspace = true
@@ -7,8 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-phylax-core.workspace = true
-phylax-graph.workspace = true
+phylaxis-core.workspace = true
+phylaxis-graph.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -29,7 +29,7 @@ the number of lines you edit.
   evaluation protocol, thesis outline, task breakdown (section 4).
 - Lay the code scaffolding: types, signatures, `impl` skeletons, doc comments (section 5).
 - Write the behaviour contracts as tests — **without ever running them** (section 6).
-- Hand off explicitly via `phylax/HANDOFF.md` (section 7).
+- Hand off explicitly via `phylaxis/HANDOFF.md` (section 7).
 
 ### ⛔ What you never do — not once, not even if "one more try will fix it"
 
@@ -57,7 +57,7 @@ The scaffolding must compile, otherwise there is nothing to hand over. So:
 
 - `cargo check --workspace --all-targets` — **at most 3 invocations for the session**;
 - at most **2 rounds of fixes** after them;
-- if it still does not compile, **stop**, paste the errors into `phylax/HANDOFF.md` under
+- if it still does not compile, **stop**, paste the errors into `phylaxis/HANDOFF.md` under
   "Does not compile, fix this first", and move on.
 
 No `cargo test` and no `cargo clippy` in this session at all. The workspace was handed to
@@ -80,8 +80,8 @@ Read in exactly this order — each file builds on the previous.
 
 | # | File | Size | What to take from it |
 |---|---|---|---|
-| 1 | `phylax/CLAUDE.md` | ~7 KB | **The immutable invariants** — determinism, scope, reachability-not-co-occurrence, taxonomy, safety, cache keying — plus the crate stack, workspace layout and session cycle. This is law. |
-| 2 | `phylax/PROJECT.md` | ~7 KB | Goal / object / subject, scientific novelty, the two-tier architecture, baselines (Aura, GuardDog), evaluation methodology, phases 1–4. |
+| 1 | `phylaxis/CLAUDE.md` | ~7 KB | **The immutable invariants** — determinism, scope, reachability-not-co-occurrence, taxonomy, safety, cache keying — plus the crate stack, workspace layout and session cycle. This is law. |
+| 2 | `phylaxis/PROJECT.md` | ~7 KB | Goal / object / subject, scientific novelty, the two-tier architecture, baselines (Aura, GuardDog), evaluation methodology, phases 1–4. |
 | 3 | `thesis/research/README.md` | ~3 KB | What the source base contains and the `[N]` numbering invariant. |
 | 4 | `thesis/research/CITATIONS.md` | ~56 KB | 33 publications: `[N]` → metadata + field (SSC/GDM/MCD/MLC/SDA) + study type (ER/VR/SP) + abstract. **The only citation source.** |
 | 5 | `thesis/research/PR2-systematic-mapping-final.txt` (Ukrainian) | ~81 KB | The submitted systematic mapping study. Read **selectively**: sections 1, 2.1–2.3, 4, 5 (the answers to RQ1–RQ3) and the reference list. Skip section 3 (abstracts) — it is already in `CITATIONS.md`. |
@@ -98,11 +98,12 @@ container folder that is not itself a repository:
 
 ```
 dep-graph-analyzer/            container, no git
-├── phylax/     [git repo]     the code half — paths below are relative to the container
+├── phylaxis/     [git repo]     the code half — paths below are relative to the container
 │   ├── Cargo.toml             workspace, 7 members, versions pinned
 │   ├── rust-toolchain.toml    stable + rustfmt + clippy
-│   ├── crates/{core,parse,graph,rules,cache,fetch,cli}/
+│   ├── crates/{core,parse,graph,rules,cache,fetch,cli,py}/
 │   │                          each with Cargo.toml wired up and an empty lib.rs
+│   ├── python/ · pyproject.toml   maturin wheel packaging, already working
 │   ├── docs/                  code digests — you create these
 │   ├── fixtures/{benign,malicious}/  and tests/   (both empty)
 │   └── CLAUDE.md · PROJECT.md · FABLE-BRIEF.md   (TASKS.md: you create it)
@@ -114,7 +115,7 @@ dep-graph-analyzer/            container, no git
 
 The code repository stays **code-only**; that is why the thesis is a separate repository
 rather than a subdirectory. When you write to `thesis/`, you are writing into the other
-repository — that is intended. Never add thesis material to the `phylax` repo, and never
+repository — that is intended. Never add thesis material to the `phylaxis` repo, and never
 add code to the `thesis` repo.
 
 Sessions run with the **container folder** as the working directory, so both halves are
@@ -123,9 +124,12 @@ reachable by the paths shown above.
 Do not commit. The author decides when to commit, in both repositories.
 
 The workspace is built and green: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`
-and `cargo check` all pass, with and without the `network` feature. Dependency versions are
+and `cargo check` all pass, with and without the `network` feature. The wheel chain is
+proven too: `maturin build --release` produces an abi3 wheel that installs into a clean venv,
+where `import phylaxis`, the `phylaxis` console script and `python -m phylaxis` all work.
+Do not rebuild the wheel — that is a release step, not an architecture step. Dependency versions are
 already resolved against crates.io. Treat them as given; if a genuine design need calls for
-a different crate, record it in `phylax/docs/DECISIONS.md` rather than going version-hunting.
+a different crate, record it in `phylaxis/docs/DECISIONS.md` rather than going version-hunting.
 
 ---
 
@@ -147,26 +151,26 @@ Record only what is **not visible from the code and git**:
 - `project` — the repository split into code half and thesis half (section 4.1).
 - `feedback` — the model role split from section 0. **Why:** an expensive model must not
   be spent on mechanical iteration. **How to apply:** see the forbidden table in
-  `phylax/FABLE-BRIEF.md`.
+  `phylaxis/FABLE-BRIEF.md`.
 - `user` — the author is learning Rust as the project goes, so non-obvious Rust needs a
   short explanation — but that explanation is written by **Opus or Sonnet**, not by you.
 - `project` — the thesis is written **iteratively by cheaper models**, one subchapter at
   a time, which is why `thesis/OUTLINE.md` must be granular and self-contained.
 
-Do not duplicate into memory anything already written in `phylax/CLAUDE.md`.
+Do not duplicate into memory anything already written in `phylaxis/CLAUDE.md`.
 
 ---
 
 ## 3. Step one: close the decisions (the main work of the session)
 
-Each decision below is its own entry in `phylax/docs/DECISIONS.md` (date, context, alternatives
+Each decision below is its own entry in `phylaxis/docs/DECISIONS.md` (date, context, alternatives
 considered, choice, consequences). Do not skip the alternatives — they are what later
 turns into thesis prose.
 
 ### 3.1 The "ML vs determinism" contradiction — most important
 
 ПР2 framed RQ2 as *"which machine learning models perform best?"* and its answer in §5.3
-concluded that GNNs and hybrid ensembles win. Yet `phylax/CLAUDE.md` invariant #1 **forbids ML
+concluded that GNNs and hybrid ensembles win. Yet `phylaxis/CLAUDE.md` invariant #1 **forbids ML
 outright**.
 
 This is not an error, it is a deliberate pivot — but **it has to be defended in writing**,
@@ -177,7 +181,7 @@ drift, no adversarial evasion via training-set poisoning, and fitness for CI/CD.
 the work **does not ignore** ПР2's conclusion but deliberately picks a different point in
 the trade-off space — and state the price of that choice honestly.
 
-Output: an entry in `phylax/docs/DECISIONS.md` plus a draft subchapter in `thesis/notes/`.
+Output: an entry in `phylaxis/docs/DECISIONS.md` plus a draft subchapter in `thesis/notes/`.
 
 ### 3.2 The source-base gap
 
@@ -193,7 +197,7 @@ describe what to look for. Do not use the network.
 ### 3.3 Reconciling the formulations
 
 ПР2 states the subject as *"approaches, methods, models and tools for detecting potentially
-malicious **or vulnerable** packages"*, while `phylax/PROJECT.md` narrows it to deterministic graph
+malicious **or vulnerable** packages"*, while `phylaxis/PROJECT.md` narrows it to deterministic graph
 analysis of malicious code. Vulnerabilities (CVEs in dependencies) are a different problem.
 Produce one reconciled statement of goal / object / subject / novelty that contradicts
 neither the already-submitted ПР2 nor the invariants. If the gap cannot be closed by
@@ -217,7 +221,7 @@ rewording, escalate it to the human.
 Metrics, dataset splits, exactly how an FP is counted, how Aura and GuardDog get run over
 the same set, and — separately — the **design of the ablation experiment**,
 co-occurrence versus reachability, because that is what demonstrates the scientific
-novelty. Specify the results table format so that `phylax/docs/RESULTS.md` can be filled in
+novelty. Specify the results table format so that `phylaxis/docs/RESULTS.md` can be filled in
 mechanically.
 
 ### 3.6 Thesis structure
@@ -229,6 +233,29 @@ Propose the structure of chapters 1–4 as a **hypothesis**, marking every item 
 on the handbook with `⚠ NEEDS HANDBOOK CHECK`. **Do not invent ДСТУ numbers, font sizes,
 margins or formatting rules.** Instead create `thesis/DSTU.md` with empty slots and a list
 of what the human has to fill in.
+
+### 3.7 The Python API surface
+
+The tool ships as a PyPI wheel (`pip install phylaxis`), so it has a **second public
+interface** besides the CLI, and that interface is a design decision, not plumbing. The
+plumbing is already built and proven — a wheel builds, installs into a clean venv, imports,
+and runs its console script. What is *not* decided is what it exposes.
+
+Settle, and record in `phylaxis/docs/DECISIONS.md`:
+
+- What `phylaxis.scan()` takes and returns. A path? Bytes? A `Distribution`? Does it return
+  a `ScanReport` marshalled into a Python dict, or an opaque handle with accessors?
+- Whether findings cross the boundary as plain data (dicts / JSON) or as PyO3 classes. Plain
+  data is cheaper to keep stable across versions; classes are nicer to use.
+- Whether the evaluation harness drives the tool through this API or through the CLI. This
+  matters now, because it decides whether batch scanning needs a `scan_many()` that keeps
+  `rayon` parallelism inside Rust rather than paying the GIL on every package.
+- What is deliberately *not* exposed, so the API does not accidentally become the whole
+  internal model.
+
+Constraint that already holds and must not be broken: CLI logic lives in
+`phylaxis/crates/cli/src/lib.rs`, and both the native binary and the Python console script
+call `run()`. Do not move logic into `main.rs`.
 
 ---
 
@@ -250,32 +277,32 @@ thesis/
 ```
 
 The boundary rule, in both directions: **code never imports from or writes into
-`thesis/`, and thesis sessions never read raw Rust** — only `phylax/docs/*.md` and
+`thesis/`, and thesis sessions never read raw Rust** — only `phylaxis/docs/*.md` and
 `thesis/notes/*.md`. That bridge is what makes it possible to write the thesis later
 without pulling thousands of lines of Rust into context, and it is the reason the digests
-in `phylax/docs/` have to be genuinely readable rather than a code dump.
+in `phylaxis/docs/` have to be genuinely readable rather than a code dump.
 
 Because these are two separate repositories, the bridge is enforced by the split rather
 than by discipline alone — but a path reference can still cross it, so keep every
-reference from a thesis document pointing at `phylax/docs/` or `notes/`, never at `phylax/crates/`.
+reference from a thesis document pointing at `phylaxis/docs/` or `notes/`, never at `phylaxis/crates/`.
 
 ### 4.2 Documents you write
 
 | File | Contents |
 |---|---|
-| `phylax/docs/ARCHITECTURE.md` | Data flow from sdist to finding, crate boundaries, who owns what, why it is shaped this way. With a diagram (mermaid, in `thesis/assets/`). |
-| `phylax/docs/DECISIONS.md` | Every decision from section 3, in ADR form. |
-| `phylax/docs/RULES.md` | **The rule catalogue.** Per rule: identifier, what it catches, its technique in the Backstabber attack tree, execution phase, sources/sinks, expected FPs, how it will be verified. |
-| `phylax/docs/EVALUATION.md` | The evaluation protocol and ablation design (section 3.5). |
-| `phylax/docs/PROGRESS.md` | Session state: done / next / open questions. Update at the end. |
-| `phylax/TASKS.md` | Task breakdown, each tagged with its owner — `[FABLE]` / `[OPUS]` / `[SONNET]` / `[HUMAN]` — with ordering, dependencies, and a schedule across the 45 days to 2026-10-19. |
+| `phylaxis/docs/ARCHITECTURE.md` | Data flow from sdist to finding, crate boundaries, who owns what, why it is shaped this way. With a diagram (mermaid, in `thesis/assets/`). |
+| `phylaxis/docs/DECISIONS.md` | Every decision from section 3, in ADR form. |
+| `phylaxis/docs/RULES.md` | **The rule catalogue.** Per rule: identifier, what it catches, its technique in the Backstabber attack tree, execution phase, sources/sinks, expected FPs, how it will be verified. |
+| `phylaxis/docs/EVALUATION.md` | The evaluation protocol and ablation design (section 3.5). |
+| `phylaxis/docs/PROGRESS.md` | Session state: done / next / open questions. Update at the end. |
+| `phylaxis/TASKS.md` | Task breakdown, each tagged with its owner — `[FABLE]` / `[OPUS]` / `[SONNET]` / `[HUMAN]` — with ordering, dependencies, and a schedule across the 45 days to 2026-10-19. |
 | `thesis/OUTLINE.md` | Chapters 1–4 broken down to subchapter level (section 4.5). |
-| `phylax/HANDOFF.md` | Section 7. |
+| `phylaxis/HANDOFF.md` | Section 7. |
 
-`phylax/CLAUDE.md` already carries the model roles, the repository split and the bridge rule, so
+`phylaxis/CLAUDE.md` already carries the model roles, the repository split and the bridge rule, so
 you do not need to add them. Amend it only if a decision from section 3 changes a **stable**
-rule there — and keep it stable: volatile detail belongs in `phylax/TASKS.md` or
-`phylax/docs/PROGRESS.md`.
+rule there — and keep it stable: volatile detail belongs in `phylaxis/TASKS.md` or
+`phylaxis/docs/PROGRESS.md`.
 
 ### 4.3 The domain model — the whole thesis rests on this
 
@@ -289,7 +316,7 @@ on an **enumeration of the domain models**. So this is not a class diagram but a
 3. attributes and relationships to other entities;
 4. a **citation anchor `[N]`** wherever the concept is drawn from the literature (call
    graphs and AST features have support in the SDA / GDM clusters);
-5. the corresponding Rust type in `phylax/crates/core` — so that text and code cannot drift apart.
+5. the corresponding Rust type in `phylaxis/crates/core` — so that text and code cannot drift apart.
 
 Minimum coverage (extend as needed):
 `Package`, `Distribution`, `SourceFile`, `AstNode`, `Symbol`, `CallGraph`,
@@ -322,7 +349,7 @@ names can draft the text without further research. So each entry carries:
 - a stable id (e.g. `2.3.1`) and a title;
 - status: `todo` / `draft` / `done`;
 - target length in pages, so a drafting model knows the scale;
-- **the exact input files** that feed it — which `thesis/notes/*.md`, which `phylax/docs/*.md`,
+- **the exact input files** that feed it — which `thesis/notes/*.md`, which `phylaxis/docs/*.md`,
   which figures in `thesis/assets/`;
 - **the citation numbers `[N]`** admissible in that subchapter;
 - one sentence stating the claim the subchapter must land.
@@ -350,6 +377,10 @@ Only after the documents above exist.
   executed**; extraction is path-traversal safe; network access only to the official PyPI
   index and only behind the `network` feature flag.
 
+In `crates/py`, scaffold only the **signatures** of whatever section 3.7 decides to expose,
+with `todo!()` bodies. Keep that crate pure marshalling — no analysis logic crosses into it,
+ever, or the CLI and the Python API will drift.
+
 **What must not be in the scaffolding:** working parsing logic, graph construction, taint
 traversal, redb access, network calls. That is not your stage.
 
@@ -364,7 +395,7 @@ the code must do.
 **Write tests. Do not run them. Ever, this session.**
 
 - Unit tests next to the code (`#[cfg(test)] mod tests`) for per-crate contracts;
-  integration tests in `phylax/tests/` for end-to-end scan behaviour.
+  integration tests in `phylaxis/tests/` for end-to-end scan behaviour.
 - Each test is a **specification**: a name that states the required behaviour, a comment
   giving the rationale, and concrete `assert!`/`assert_eq!` calls against the intended API.
 - Tests will not pass — they call `todo!()` bodies and will panic. **That is correct and
@@ -374,7 +405,7 @@ the code must do.
   `cargo check --workspace --all-targets` covers test code and falls under the section 0
   budget. That check is allowed; `cargo test` is not.
 - Where a fixture is needed, do not build it — reference it by intended path
-  (`phylax/fixtures/malicious/setup_py_exfil/`) and describe what it must contain in a comment.
+  (`phylaxis/fixtures/malicious/setup_py_exfil/`) and describe what it must contain in a comment.
   Sonnet builds fixtures.
 - Mark anything that cannot compile yet with `#[ignore]` plus a comment explaining why,
   rather than deleting it.
@@ -390,7 +421,7 @@ thinning all of them out:
    thesis contribution; write it carefully, it will be quoted in the text.
 3. **Cache keying** — the same sha256 with the same ruleset version hits; a ruleset bump
    misses.
-4. **Rule catalogue** — one test per rule in `phylax/docs/RULES.md`, positive and negative.
+4. **Rule catalogue** — one test per rule in `phylaxis/docs/RULES.md`, positive and negative.
 5. Everything else.
 
 Record in `thesis/notes/` that the test suite doubles as the formal behaviour
@@ -400,17 +431,17 @@ specification — that is a point worth making in the testing chapter.
 
 ## 7. Handover
 
-`phylax/HANDOFF.md` at the root is the last thing you write:
+`phylaxis/HANDOFF.md` at the root is the last thing you write:
 
 1. What this session produced (as a file list).
-2. **What the next agent does first** — one concrete task from `phylax/TASKS.md`.
+2. **What the next agent does first** — one concrete task from `phylaxis/TASKS.md`.
 3. If the scaffolding does not compile: the exact errors and your hypothesis.
 4. Expected state of the test suite: how many tests exist, that they are red by design,
    and which ones Sonnet should turn green first.
 5. Questions left open for the human.
-6. The rule for later sessions: *read `phylax/docs/PROGRESS.md` → `phylax/TASKS.md` → your task. The
+6. The rule for later sessions: *read `phylaxis/docs/PROGRESS.md` → `phylaxis/TASKS.md` → your task. The
    rules are already written — do not invent new ones; if a rule is missing, file a
-   request in `phylax/docs/DECISIONS.md` rather than a decision in the code.*
+   request in `phylaxis/docs/DECISIONS.md` rather than a decision in the code.*
 
 ---
 
@@ -425,7 +456,7 @@ that is precisely the expense this session exists to avoid.
 
 **The session is done when:** every document in section 4 exists and contains no
 placeholder prose (other than explicit `⚠ NEEDS HANDBOOK CHECK` markers), the scaffolding
-is in place, the test contracts are written, `phylax/HANDOFF.md` exists, and `phylax/docs/PROGRESS.md`
+is in place, the test contracts are written, `phylaxis/HANDOFF.md` exists, and `phylaxis/docs/PROGRESS.md`
 is updated.
 
 **If time or context runs short**, sacrifice in this order: scaffolding (5) first, then

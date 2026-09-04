@@ -1,8 +1,6 @@
-//! Command line entry point.
-//!
-//! Placeholder. The clap command surface and scan orchestration are designed in
-//! the architecture session -- see `FABLE-BRIEF.md`, section 5.
+//! Native binary entry point. Thin wrapper -- the work is in `phylaxis_cli::run`.
 
 fn main() {
-    println!("phylax: scaffold only, no scan implemented yet");
+    let code = phylaxis_cli::run(std::env::args().collect());
+    std::process::exit(code);
 }

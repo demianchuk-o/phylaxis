@@ -1,5 +1,5 @@
 [package]
-name = "phylax-core"
+name = "phylaxis-core"
 description = "Domain types, attack taxonomy and shared configuration."
 version.workspace = true
 edition.workspace = true

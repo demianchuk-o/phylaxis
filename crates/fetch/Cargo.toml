@@ -1,5 +1,5 @@
 [package]
-name = "phylax-fetch"
+name = "phylaxis-fetch"
 description = "Optional PyPI package downloader. Network access is feature-gated."
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-phylax-core.workspace = true
+phylaxis-core.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

@@ -1,22 +1,26 @@
 [package]
-name = "phylax-cli"
+name = "phylaxis-cli"
 description = "Command line entry point and scan orchestration."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "phylaxis_cli"
+path = "src/lib.rs"
+
 [[bin]]
-name = "phylax"
+name = "phylaxis"
 path = "src/main.rs"
 
 [dependencies]
-phylax-core.workspace = true
-phylax-parse.workspace = true
-phylax-graph.workspace = true
-phylax-rules.workspace = true
-phylax-cache.workspace = true
-phylax-fetch.workspace = true
+phylaxis-core.workspace = true
+phylaxis-parse.workspace = true
+phylaxis-graph.workspace = true
+phylaxis-rules.workspace = true
+phylaxis-cache.workspace = true
+phylaxis-fetch.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rayon.workspace = true
