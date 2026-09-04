@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/REPLACE-ME/phylax"
+
+# Internal crates. Depend on these through `workspace = true` so that a version
+# bump happens in exactly one place.
+[workspace.dependencies]
+phylax-core = { path = "crates/core" }
+phylax-parse = { path = "crates/parse" }
+phylax-graph = { path = "crates/graph" }
+phylax-rules = { path = "crates/rules" }
+phylax-cache = { path = "crates/cache" }
+phylax-fetch = { path = "crates/fetch" }
+
+# External crates. Versions resolved against crates.io on 2026-09-04; the stack
+# itself is fixed by CLAUDE.md, not chosen here.
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+flate2 = "1.1.10"
+insta = "1.48.0"
+petgraph = "0.8.3"
+rayon = "1.12.0"
+redb = "4.2.0"
+reqwest = { version = "0.13.4", features = ["rustls", "json"], default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tar = "0.4.46"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tree-sitter = "0.27.0"
+tree-sitter-python = "0.25.0"
+walkdir = "2.5.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Scanning a labelled dataset under a debug build is unusably slow, but a full
+# release build loses the panic backtraces that make a failed scan diagnosable.
+[profile.dev.package."*"]
+opt-level = 2

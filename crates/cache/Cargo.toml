@@ -1,0 +1,15 @@
+[package]
+name = "phylax-cache"
+description = "redb-backed result cache keyed by sha256 + ruleset version."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+phylax-core.workspace = true
+redb.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

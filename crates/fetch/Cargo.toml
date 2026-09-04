@@ -1,0 +1,19 @@
+[package]
+name = "phylax-fetch"
+description = "Optional PyPI package downloader. Network access is feature-gated."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+phylax-core.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+
+[features]
+# OFF by default. Invariant 5 (CLAUDE.md): the network is only ever used to pull
+# packages from the official PyPI index, never in response to package contents.
+default = []
+network = ["dep:tokio", "dep:reqwest"]

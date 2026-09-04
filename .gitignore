@@ -1,0 +1,17 @@
+/target/
+**/*.rs.bk
+
+# Snapshot review leftovers from `insta`
+**/*.snap.new
+
+# Downloaded corpora and scratch scan output. Datasets are large and are pulled
+# by script, never committed.
+/datasets/
+/out/
+/.phylax-cache/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

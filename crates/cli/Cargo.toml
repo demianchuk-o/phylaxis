@@ -1,0 +1,28 @@
+[package]
+name = "phylax-cli"
+description = "Command line entry point and scan orchestration."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "phylax"
+path = "src/main.rs"
+
+[dependencies]
+phylax-core.workspace = true
+phylax-parse.workspace = true
+phylax-graph.workspace = true
+phylax-rules.workspace = true
+phylax-cache.workspace = true
+phylax-fetch.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rayon.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
