@@ -1,6 +1,6 @@
 # ARCHITECTURE — from sdist to finding
 
-A digest for humans, not a code dump (SOUNDS VERY AI-ISH): what happens to an sdist, in order, and which crate owns each step. Decisions referenced as ADR-nnn are in `DECISIONS.md`; the safety guarantees and the threat model behind them are in `SAFETY.md`.
+A digest for humans, not a code dump: what happens to an sdist, in order, and which crate owns each step. Decisions referenced as ADR-nnn are in `DECISIONS.md`; the safety guarantees and the threat model behind them are in `SAFETY.md`.
 ## The pipeline in one paragraph
 
 An sdist (`.tar.gz`) or an already-extracted directory goes in. Its sha256 and the current

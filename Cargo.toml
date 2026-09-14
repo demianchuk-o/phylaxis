@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/REPLACE-ME/phylaxis"
+repository = "https://github.com/demianchuk-o/phylaxis"
 
 # Internal crates. Depend on these through `workspace = true` so that a version
 # bump happens in exactly one place.
