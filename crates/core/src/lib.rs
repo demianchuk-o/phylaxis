@@ -5,22 +5,28 @@
 //! I/O and depends only on `serde`, `thiserror` and `petgraph` (DECISIONS.md, ADR-015).
 //!
 //! The model lands in blocks, and this module list grows with them. Landed so far — identity
-//! and inputs: what a package, a distribution and a source file *are*. The bracketed numbers
-//! are stable entity ids used when the model is written up outside the code.
+//! and inputs, then the shape of parsed source. The bracketed numbers are stable entity ids
+//! used when the model is written up outside the code.
 //! - `ids`       FileId, AstNodeId, SymbolId — the arena indices every table is addressed by
 //! - `package`   Package [1], Distribution [2], Sha256Digest
 //! - `source`    SourceFile [3], ProjectMeta
+//! - `ast`       Ast, AstNode [4], Span
+//! - `symbols`   Symbol, SymbolTable [5], QualifiedName
 //! - `error`     CoreError
 
+pub mod ast;
 pub mod error;
 pub mod ids;
 pub mod package;
 pub mod source;
+pub mod symbols;
 
+pub use ast::{Ast, AstKind, AstNode, Span};
 pub use error::CoreError;
 pub use ids::{AstNodeId, FileId, SymbolId};
 pub use package::{Distribution, DistributionKind, Package, PackageName, Sha256Digest};
 pub use source::{ProjectMeta, SourceFile, SourceKind};
+pub use symbols::{ImportAlias, QualifiedName, Symbol, SymbolKind, SymbolTable};
 
 #[cfg(test)]
 mod tests {
@@ -35,7 +41,10 @@ mod tests {
             type_name::<crate::Package>(),
             type_name::<crate::Distribution>(),
             type_name::<crate::SourceFile>(),
+            type_name::<crate::AstNode>(),
+            type_name::<crate::Symbol>(),
+            type_name::<crate::SymbolTable>(),
         ];
-        assert_eq!(names.len(), 3);
+        assert_eq!(names.len(), 6);
     }
 }
