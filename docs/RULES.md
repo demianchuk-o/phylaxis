@@ -217,7 +217,7 @@ source of truth; the tables below describe them.
 | Objective: exfiltration | EXF-001…004, INS-003 |
 | Objective: dropper | DRP-001…003 |
 | Objective: backdoor | BKD-001, PER-001 |
-| Objective: sabotage / DoS | SAB-001 |
+| Objective: denial of service | SAB-001 |
 | Objective: financial gain (mining, wallet theft) | partially via EXF-002 (wallet files) and DRP-002 (miner binary); a dedicated wallet-address rule is deferred (phase 2, `PHX-FIN-001`, request in DECISIONS.md if needed) |
 | Execution: install | INS-001…003 plus phase weighting on every rule |
 | Execution: runtime (import / call) | phase weighting |

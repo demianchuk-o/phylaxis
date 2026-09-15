@@ -987,6 +987,7 @@ dependencies = [
 name = "phylaxis-core"
 version = "0.1.0"
 dependencies = [
+ "petgraph",
  "serde",
  "serde_json",
  "thiserror",

@@ -304,8 +304,22 @@ without breaking "finding = path".
 
 ### Choice
 
-- `ExecutionPhase = { Install, Import, Runtime }`. `Import` is this work's refinement of
-  Backstabber's "runtime: on import", and is labelled as a refinement wherever it is reported.
+- `ExecutionPhase = { Install, Import, Runtime }`. The paper's execution attack tree names
+  three lifecycle phases — *test cases*, *install scripts* and *runtime* — and has no separate
+  import node. It gives `__init__.py`, invoked through an import statement, as the *Python
+  example* of its `runtime` branch, and states that "the specifics of individual programming
+  languages, package managers, etc. may easily be covered by refining this goal" (§4.3).
+  `Import` is exactly that refinement, for one ecosystem, and is labelled as a refinement
+  wherever it is reported. `WHY it earns its own phase:` module-level code in `__init__.py`
+  runs on the first `import` with no call from the victim, which is a materially different
+  exposure from code that runs only when something invokes it.
+- **The `test cases` phase is deliberately out of scope**, so this enum covers two of the
+  paper's three lifecycle phases plus the refinement of the third. `WHY:` the analysed
+  artefact is an sdist and the modelled act is `pip install`, which builds and may import but
+  never invokes a test runner. A test-time payload needs a maintainer or a CI job to run the
+  suite — a different threat model with a different victim, the contributor rather than the
+  downstream user. It is 1% of the paper's dataset. Recorded here so that the omission reads
+  as a boundary rather than an oversight.
 - The **PhaseMap** assigns a phase to every callable definition by reachability from
   **phase roots** in the call graph:
   - `Install` roots: `<module>` of `setup.py`; the `run` method of any class used as a
