@@ -180,10 +180,28 @@ of thing worth pre-empting in writing, since a reviewer may well ask.
 ## Working cycle (important for pausing and resuming between sessions)
 
 - Work on ONE task from `../notes/TASKS.md`. Mark it done ONLY after the tests pass.
-- **The reading gate.** Code is not committed because it is green. It is committed after the
-  author has read that block, been walked through it, and answered questions on it well
-  enough that they could defend it. Green tests are the precondition; the author's
-  understanding is the gate. The order of blocks is fixed in `../notes/COMMIT-PLAN.md`.
+- **The reading gate, in two tiers.** Code is not committed because it is green. Green tests
+  are the precondition; what the author can account for is the gate. But the depth of that
+  accounting is proportional to what the block carries, not uniform across the workspace:
+  - **Tier 1 — the claim.** The blocks the project's contribution rests on: the data-flow
+    graph and the reachability predicate, the inter-package blast radius, the risk formula's
+    constants, and the evaluation numbers. These are read with the author, line by line,
+    before they are committed. A question about these has to be answerable from memory.
+  - **Tier 2 — everything else.** Plumbing, parsing, caching, CLI, bindings, fixtures, the
+    rule catalogue as data. The implementer commits these once green and writes a **defence
+    card** to `../notes/DEFENSE/<block>.md`: what it does, the one design choice inside it,
+    what would break it, and the questions it invites with their answers. The card is the
+    account; the code is behind it if the card raises something.
+
+  This is a change of shape, not a lowering. The previous rule — read every block before
+  committing it — spent the same hour on a redb wrapper as on the reachability predicate, and
+  the hour is the scarce resource. The order of blocks is fixed in `../notes/COMMIT-PLAN.md`,
+  which also records the tier of each.
+
+  **Care when writing is a separate dial from depth when reading.** `parse::extract` is tier 2
+  for reading and maximum care when written: a wrong path-traversal guard passes its test and
+  is a real hole. `docs/SAFETY.md` carries that argument structurally, which is what makes the
+  block defensible without being read line by line.
 - Commit messages describe the block, not the session. Ask before committing — the author
   decides when. No AI attribution trailers (`Co-Authored-By`, `Claude-Session`); this is a
   standing decision, not something to re-request.
