@@ -630,4 +630,23 @@ Concretely:
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
 was applied meanwhile.
 
-- *(none yet)*
+- **2026-09-16, T-03 (`parse::extract`) — should extraction write every archive member, or
+  only the files the analyser will read?**
+
+  The contract in the module says "extracts into a fresh temporary directory", so the
+  implementation writes every validated member, and that is what landed. The conservative
+  reading was taken: a faithful extraction is what the doc promises and what `load_directory`
+  mirrors.
+
+  The alternative is narrower and arguably safer. The analyser only ever reads `.py` and
+  `pyproject.toml`; every other member — archived binaries, nested archives, data blobs — is
+  written to disk, never opened, and deleted on drop. Writing only classified source files
+  would mean an extraction root that contains nothing but Python text, so nothing downstream
+  could mishandle a payload that is not source even in principle. The cost is that `root`
+  stops being a faithful copy of the sdist, which matters if any later stage wants to reason
+  about the distribution's full contents (`MANIFEST.in`, data files, or a future rule about
+  what an sdist ships).
+
+  Needs a decision before T-12 wires the CLI to it. Either way the safety guarantee is
+  unchanged — no member escapes the root — so this is about narrowing the blast radius of a
+  future mistake, not about closing a present hole.
