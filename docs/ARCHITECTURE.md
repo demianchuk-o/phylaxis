@@ -5,8 +5,9 @@ A digest for humans, not a code dump: what happens to an sdist, in order, and wh
 
 An sdist (`.tar.gz`) or an already-extracted directory goes in. Its sha256 and the current
 ruleset version form a cache key; a hit returns the stored report unchanged. On a miss the
-archive is extracted with path-traversal protection, every `.py`, `setup.py` and
-`pyproject.toml` is parsed by tree-sitter and lowered into an owned AST, the ASTs are joined
+archive is extracted with path-traversal protection and with only Python source written to
+disk — every other member is recorded by path and dropped unread (ADR-020) — every `.py`,
+`setup.py` and `pyproject.toml` is parsed by tree-sitter and lowered into an owned AST, the ASTs are joined
 into one **package graph** (symbol table, call graph, data-flow graph, phase map), the rule
 catalogue asks the graph for source→sink reachability paths, each path becomes a finding
 whose evidence *is* the path, findings are scored deterministically into a package verdict,
@@ -96,4 +97,5 @@ release the GIL.
 ## Keeping this document current
 
 When a stage changes shape, update the table row here in the same change. This document and
-`DECISIONS.md` are how the design is read without reading the crates; they are only worth that if they are true. (IS THIS EVEN FOR HUMAN TO READ?)
+`DECISIONS.md` are how the design is read without reading the crates; they are only worth
+that if they are true.

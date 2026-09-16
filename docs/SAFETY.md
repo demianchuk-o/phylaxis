@@ -36,7 +36,7 @@ module, or invokes `pip`. This is not a check that could be bypassed; the capabi
 absent. `parse` reads bytes and hands them to a parser. Nothing downstream of it has an
 execution primitive to reach for.
 
-*Proven by:* `crates/cli/tests/e2e_safety.rs::extraction_never_runs_setup_py`, over a fixture
+*Proven by:* `crates/cli/tests/e2e_safety.rs::extraction_and_scan_never_run_setup_py`, over a fixture
 whose `setup.py` would write a marker file beside itself if it ever ran. The test asserts
 the marker does not exist.
 
@@ -119,6 +119,28 @@ gate.
 
 *Proven by:* `e2e_scan.rs::scan_is_byte_deterministic`.
 
+### G6 — Only Python source is written to disk
+
+The extraction root contains `.py` and `pyproject.toml` files and nothing else. Every other
+member of the archive — a bundled native binary, a nested archive, a data blob — has its path
+and declared size recorded and its bytes discarded unread (ADR-020).
+
+This one is worth separating from G1. G1 says phylaxis has no primitive that could execute a
+package's code. G6 says the bytes that would need such a primitive are not even present. The
+difference matters because G1 is a statement about which code paths exist, and you check it by
+reading the source and trusting the reader; G6 is a statement about a directory, and you check
+it by listing the directory.
+
+What is *not* discarded is the knowledge that the file exists. `ExtractedTree::contains_path`
+answers whether the distribution ships a given path, across both analysed files and the
+manifest, because a package running a binary it carries and a package running one it downloads
+are different findings and that predicate is what separates them.
+
+*Enforced at:* `parse::extract::extract_sdist` and `load_directory`.
+*Proven by:* `parse::extract::tests::only_python_source_reaches_the_extraction_root`, which
+walks the extraction root and asserts the name of every file in it, and
+`::load_directory_records_non_source_members_without_reading_them`.
+
 ## What is not guaranteed
 
 - **The tool's own dependencies are inside its trust boundary.** phylaxis parses hostile
@@ -141,11 +163,12 @@ all of them pass yet. This table is the truth as of the last run.
 
 | Guarantee | Specified | Tests written | Passing |
 |---|---|---|---|
-| G1 no execution | yes | yes | not yet — needs the fixture (T-02) |
-| G2 no escape | yes | yes | not yet — `validate_entry` unimplemented (T-03) |
+| G1 no execution | yes | yes | not yet — the fixture exists (T-02); the test drives `scan_one`, which is T-12 |
+| G2 no escape | yes | yes | **yes** at the unit level — `validate_entry` and the `tar_slip` archive; the end-to-end test waits on T-12 |
 | G3 network gate | yes | yes | **yes**, except `PackageRef::parse` (T-14) |
-| G4 bounded resources | yes | yes | not yet (T-03, T-08) |
+| G4 bounded resources | yes | yes | extraction **yes** (entry count, per-file and total bytes, both from the header and from the bytes read); literal folding not yet (T-08) |
 | G5 determinism | yes | yes | not yet (T-12) |
+| G6 only source on disk | yes | yes | **yes** (T-03 + ADR-020) |
 
 Nothing in this document may be softened to make a test pass. If an implementation cannot
 meet a guarantee, the guarantee changes here first, by a recorded decision in `DECISIONS.md`,

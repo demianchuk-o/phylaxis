@@ -19,6 +19,19 @@
 //! passes buy a guarantee that can be stated in one sentence and needs no cleanup path to be
 //! true: **no file is created until the entire archive has been found clean.** The cost is
 //! decompressing an sdist twice, which is a few milliseconds on inputs of this size.
+//!
+//! # What reaches the disk (ADR-020)
+//!
+//! Only `.py` and `pyproject.toml`. Every other member — bundled binaries, nested archives,
+//! data files, documentation — has its path and declared size recorded in
+//! [`ExtractedTree::manifest`] and its bytes discarded unread.
+//!
+//! The analyser never opens those files anyway (invariant 2), so writing them bought nothing;
+//! not writing them turns a claim about code paths into a property of the disk that a test can
+//! check by walking the extraction root. The manifest is kept because **existence is signal**:
+//! `subprocess.run(["./vendor/helper.bin"])` is a package running a payload it ships when that
+//! path is in the distribution, and a download-and-execute shape when it is not. Same line,
+//! different finding, and the discriminator is a fact about a file nothing needs to read.
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -44,6 +57,20 @@ pub enum EntryKind {
     Other,
 }
 
+/// A member of the distribution that is not analysed: anything that is not `.py` or
+/// `pyproject.toml` (ADR-020). The bytes are discarded; the path and size are kept, because a
+/// rule may need to know that the distribution *ships* a given file without ever reading it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ManifestEntry {
+    /// Relative to the distribution root, forward slashes, same convention as `SourceFile`.
+    pub rel_path: String,
+    /// For an archive member this is the size declared in the tar header — the archive's
+    /// claim, not a measurement, because the body is never read. For a directory member it is
+    /// the size on disk. The distinction matters if a rule ever reasons about the number:
+    /// an attacker controls the header, and nothing here verifies it.
+    pub size_bytes: u64,
+}
+
 /// The files of one distribution on disk, in canonical order.
 ///
 /// `root` is a fresh temporary directory when created by [`extract_sdist`] and is removed
@@ -55,6 +82,8 @@ pub struct ExtractedTree {
     pub root: PathBuf,
     /// Sorted by `rel_path`; `FileId`s are positions in this vector (ADR-004 determinism).
     pub files: Vec<SourceFile>,
+    /// Members that were seen but not written, sorted by `rel_path` (ADR-020).
+    pub manifest: Vec<ManifestEntry>,
     /// Parsed from the archive name and contents; `None` for directories.
     pub distribution: Option<Distribution>,
     owned_temp: bool,
@@ -66,12 +95,14 @@ impl ExtractedTree {
     pub fn new(
         root: PathBuf,
         files: Vec<SourceFile>,
+        manifest: Vec<ManifestEntry>,
         distribution: Option<Distribution>,
         owned_temp: bool,
     ) -> Self {
         Self {
             root,
             files,
+            manifest,
             distribution,
             owned_temp,
         }
@@ -79,6 +110,16 @@ impl ExtractedTree {
 
     pub fn is_temporary(&self) -> bool {
         self.owned_temp
+    }
+
+    /// Whether the distribution ships `rel_path`, whether or not it was analysed.
+    ///
+    /// This is the question a rule asks about `subprocess.run(["./vendor/helper.bin"])`: a
+    /// package executing a file it carries is a different finding from one executing a file
+    /// it must fetch first, and only this predicate separates them.
+    pub fn contains_path(&self, rel_path: &str) -> bool {
+        self.files.iter().any(|f| f.rel_path == rel_path)
+            || self.manifest.iter().any(|m| m.rel_path == rel_path)
     }
 }
 
@@ -371,7 +412,7 @@ pub fn extract_sdist(
     let root = fresh_temp_dir()?;
     let tree_root = root.clone();
     // Own the directory immediately, so that an error below still removes it.
-    let mut tree = ExtractedTree::new(tree_root, Vec::new(), None, true);
+    let mut tree = ExtractedTree::new(tree_root, Vec::new(), Vec::new(), None, true);
 
     let mut archive = open_archive(sdist_path)?;
     let entries = archive
@@ -379,6 +420,7 @@ pub fn extract_sdist(
         .map_err(|e| ParseError::Archive(e.to_string()))?;
 
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut manifest: Vec<ManifestEntry> = Vec::new();
     for entry in entries {
         let mut entry = entry.map_err(|e| ParseError::Archive(e.to_string()))?;
         let Some(kind) = entry_kind(entry.header().entry_type()) else {
@@ -399,6 +441,23 @@ pub fn extract_sdist(
             continue;
         };
         if kind == EntryKind::Directory || rel.is_empty() {
+            continue;
+        }
+
+        // ADR-020. A member the analyser will never open is recorded and dropped here: its
+        // body is not read and nothing is written for it. The loop must still reach the next
+        // header, which `tar`'s iterator handles by skipping the body it already knows the
+        // length of, so this costs nothing and keeps the extraction root free of everything
+        // that is not Python text.
+        if SourceFile::classify(&rel).is_none() {
+            let size_bytes = entry
+                .header()
+                .size()
+                .map_err(|e| ParseError::Archive(e.to_string()))?;
+            manifest.push(ManifestEntry {
+                rel_path: rel,
+                size_bytes,
+            });
             continue;
         }
 
@@ -436,11 +495,12 @@ pub fn extract_sdist(
             source,
         })?;
 
-        if SourceFile::classify(&rel).is_some() {
-            files.push((rel, bytes));
-        }
+        files.push((rel, bytes));
     }
 
+    manifest.sort();
+    manifest.dedup();
+    tree.manifest = manifest;
     tree.files = collect_sources(files);
     tree.distribution = describe_distribution(sdist_path)?;
     Ok(tree)
@@ -528,6 +588,7 @@ fn describe_distribution(sdist_path: &Path) -> Result<Option<Distribution>, Pars
 /// does not own `dir` and never deletes it. Directories are never cached (ADR-017).
 pub fn load_directory(dir: &Path, opts: &ExtractOptions) -> Result<ExtractedTree, ParseError> {
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut manifest: Vec<ManifestEntry> = Vec::new();
     let mut count: u32 = 0;
     let mut total: u64 = 0;
 
@@ -554,7 +615,7 @@ pub fn load_directory(dir: &Path, opts: &ExtractOptions) -> Result<ExtractedTree
             .strip_prefix(dir)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
-        if rel.is_empty() || SourceFile::classify(&rel).is_none() {
+        if rel.is_empty() {
             continue;
         }
 
@@ -585,6 +646,17 @@ pub fn load_directory(dir: &Path, opts: &ExtractOptions) -> Result<ExtractedTree
             });
         }
 
+        // ADR-020, the directory half: a non-source file is recorded and left alone. Here
+        // the size really is measured rather than claimed -- there is no attacker-written
+        // header in the way -- but nothing reads the contents either way.
+        if SourceFile::classify(&rel).is_none() {
+            manifest.push(ManifestEntry {
+                rel_path: rel,
+                size_bytes: meta.len(),
+            });
+            continue;
+        }
+
         let bytes = fs::read(entry.path()).map_err(|source| ParseError::Io {
             path: entry.path().to_owned(),
             source,
@@ -592,10 +664,14 @@ pub fn load_directory(dir: &Path, opts: &ExtractOptions) -> Result<ExtractedTree
         files.push((rel, bytes));
     }
 
+    manifest.sort();
+    manifest.dedup();
+
     // `owned_temp: false` -- this tree is the caller's and is never removed on drop.
     Ok(ExtractedTree::new(
         dir.to_owned(),
         collect_sources(files),
+        manifest,
         None,
         false,
     ))
@@ -798,6 +874,70 @@ mod tests {
             .unwrap_or_default();
         v.sort();
         v
+    }
+
+    // ADR-020: the extraction root holds Python text and nothing else. This is the point of
+    // the narrowing -- it turns "we never open a non-Python file", which is a claim about code
+    // paths, into a property of the disk that a test can check by walking it.
+    #[test]
+    fn only_python_source_reaches_the_extraction_root() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/benign/setup_py_plain.tar.gz");
+        let tree = extract_sdist(&fixture, &ExtractOptions::default()).unwrap();
+
+        let mut written = 0usize;
+        for entry in walkdir::WalkDir::new(&tree.root).follow_links(false) {
+            let entry = entry.unwrap();
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                name.ends_with(".py") || name == "pyproject.toml",
+                "non-source file reached the extraction root: {name}"
+            );
+            written += 1;
+        }
+        assert!(written > 0, "nothing was extracted at all");
+
+        // README.md ships in the fixture. It must be known about and must not be on disk.
+        assert!(
+            tree.manifest.iter().any(|m| m.rel_path == "README.md"),
+            "manifest: {:?}",
+            tree.manifest
+        );
+        assert!(!tree.root.join("README.md").exists());
+    }
+
+    // The predicate a rule asks about `subprocess.run(["./vendor/helper.bin"])`: does the
+    // distribution ship this path, whether or not we analysed it?
+    #[test]
+    fn contains_path_spans_both_analysed_and_recorded_members() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/benign/setup_py_plain.tar.gz");
+        let tree = extract_sdist(&fixture, &ExtractOptions::default()).unwrap();
+        assert!(tree.contains_path("setup.py"), "an analysed member");
+        assert!(tree.contains_path("README.md"), "a recorded member");
+        assert!(
+            !tree.contains_path("vendor/helper.bin"),
+            "a member that is absent"
+        );
+    }
+
+    // The same narrowing on the directory path, over a fixture that ships a C source file.
+    #[test]
+    fn load_directory_records_non_source_members_without_reading_them() {
+        let dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/benign/setup_py_env_cflags");
+        let tree = load_directory(&dir, &ExtractOptions::default()).unwrap();
+        assert!(tree.files.iter().any(|f| f.rel_path == "setup.py"));
+        assert!(
+            tree.manifest.iter().any(|m| m.rel_path == "src/speedups.c"),
+            "manifest: {:?}",
+            tree.manifest
+        );
+        assert!(tree.contains_path("src/speedups.c"));
+        assert!(!tree.files.iter().any(|f| f.rel_path == "src/speedups.c"));
     }
 
     // A directory tree is loaded in place and is NOT owned: dropping must not delete it.

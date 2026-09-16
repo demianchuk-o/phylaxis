@@ -625,28 +625,76 @@ Concretely:
 
 ---
 
+## ADR-020 — Only Python source is written to disk; everything else is a manifest entry
+
+**Date:** 2026-09-16. **Status:** accepted. Supersedes the open request filed with T-03.
+
+### Context
+
+Extraction wrote every validated archive member into the temporary root. The analyser reads
+only `.py` and `pyproject.toml` (invariant 2), so every other member — bundled binaries,
+nested archives, data files, documentation — was written, never opened, and deleted on drop.
+
+That is not a hole. Nothing reads those bytes and nothing can execute them. But it makes the
+safety story weaker than it needs to be: "phylaxis never opens a non-Python file" is a claim
+about which code paths exist, and the only way to check it is to read the code and believe the
+reader. Meanwhile the bytes really are sitting on a disk, written there by an untrusted
+archive, for as long as the scan runs.
+
+### Alternatives considered
+
+1. **Write every member** (what T-03 landed, as the conservative reading of the module
+   contract). The extraction root is a faithful copy of the sdist. Rejected: it materialises
+   untrusted bytes that nothing will ever read, and leaves the guarantee unverifiable.
+2. **Write only source files and discard everything else outright.** Rejected, and this is the
+   interesting rejection. **Existence is signal.** `subprocess.run(["./vendor/helper.bin"])` is
+   a package executing a payload it *ships* when that path is in the distribution, and the
+   download-write-execute shape (PHX-DRP-002) when it is not — two different findings from one
+   line of Python, separated by a fact about a file that nothing needs to read. Dropping
+   non-source members entirely throws that discriminator away.
+3. **Write only source files; record the path and declared size of every other member.**
+   Chosen.
+
+### Choice
+
+`extract_sdist` writes a member only when `SourceFile::classify` accepts it. Every other
+member's body is skipped unread, and `ManifestEntry { rel_path, size_bytes }` is appended to
+`ExtractedTree::manifest`, sorted. `load_directory` does the same over a directory.
+`ExtractedTree::contains_path` answers "does this distribution ship this path", spanning both
+the analysed files and the manifest.
+
+Three details worth stating:
+
+- **The limits still count every member.** A multi-gigabyte data file is a decompression bomb
+  whether or not it is written, so `max_entries` and `max_total_bytes` are unchanged and
+  continue to see the whole archive. Only the write narrowed.
+- **`size_bytes` is the tar header's claim, not a measurement**, because the body is never
+  read. The field's documentation says so. Any future rule reasoning about the number must
+  treat it as attacker-controlled. (For `load_directory` it is the real size on disk, where
+  there is no attacker-written header in the way.)
+- **This is not a scope change.** Invariant 2 already put compiled extensions outside
+  *analysis*; this decision is about what reaches the file system, not about what is analysed.
+
+### Consequences
+
+- A new guarantee, **G6 in `SAFETY.md`**, with a test that walks the extraction root and
+  asserts every file is `.py` or `pyproject.toml`. The claim becomes a property of the disk
+  instead of an argument about code paths — which is the whole point.
+- The extraction root shrinks to the part of an sdist that is usually a small fraction of it,
+  so extraction gets cheaper as a side effect rather than as a goal.
+- It opens a rule that cannot be written today: *the distribution ships a native executable and
+  Python calls `subprocess` on that path*. Classifying a member by magic bytes (ELF, PE, Mach-O,
+  nested archive) is deliberately **not** decided here — it is a new detection capability and
+  needs its own ADR, its own row in `RULES.md` and its own fixture pair.
+- Cross-language analysis stays out of scope: the corpus is PyPI and the parser is Python-only.
+  But the manifest is the seam such work would attach to, and it costs nothing to have kept it.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
 was applied meanwhile.
 
-- **2026-09-16, T-03 (`parse::extract`) — should extraction write every archive member, or
-  only the files the analyser will read?**
-
-  The contract in the module says "extracts into a fresh temporary directory", so the
-  implementation writes every validated member, and that is what landed. The conservative
-  reading was taken: a faithful extraction is what the doc promises and what `load_directory`
-  mirrors.
-
-  The alternative is narrower and arguably safer. The analyser only ever reads `.py` and
-  `pyproject.toml`; every other member — archived binaries, nested archives, data blobs — is
-  written to disk, never opened, and deleted on drop. Writing only classified source files
-  would mean an extraction root that contains nothing but Python text, so nothing downstream
-  could mishandle a payload that is not source even in principle. The cost is that `root`
-  stops being a faithful copy of the sdist, which matters if any later stage wants to reason
-  about the distribution's full contents (`MANIFEST.in`, data files, or a future rule about
-  what an sdist ships).
-
-  Needs a decision before T-12 wires the CLI to it. Either way the safety guarantee is
-  unchanged — no member escapes the root — so this is about narrowing the blast radius of a
-  future mistake, not about closing a present hole.
+- *(none open)* The T-03 extraction-scope request was closed by **ADR-020** on 2026-09-16:
+  only `.py` and `pyproject.toml` are written, everything else becomes a manifest entry.
