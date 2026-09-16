@@ -417,8 +417,9 @@ motivated it (ADR-011).
 
 ### Consequences
 
-`RiskScore` is a newtype over `f64` with the formula in one function in `phylaxis-rules`,
-covered by determinism tests.
+`RiskScore` is a newtype over `f64` with the formula in one function in `phylaxis-core`
+(`finding.rs`, alongside `Finding` itself so that a finding cannot be built without being
+scored), covered by determinism tests.
 
 ---
 

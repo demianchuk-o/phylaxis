@@ -5,10 +5,10 @@
 //! I/O and depends only on `serde`, `thiserror` and `petgraph` (DECISIONS.md, ADR-015).
 //!
 //! The model lands in blocks, and this module list grows with them. Landed so far — identity
-//! and inputs, the shape of parsed source, and the signal itself in type form: when code
-//! runs, the two graphs a path is found in, where a path starts and ends, and the shape of
-//! the evidence it produces. The bracketed numbers are stable entity ids used when the model
-//! is written up outside the code.
+//! and inputs, the shape of parsed source, the signal itself in type form (when code runs, the
+//! two graphs a path is found in, where a path starts and ends, the shape of the evidence), and
+//! now what a rule is and what it produces when it fires. The bracketed numbers are stable
+//! entity ids used when the model is written up outside the code.
 //! - `ids`       FileId, AstNodeId, SymbolId — the arena indices every table is addressed by
 //! - `package`   Package [1], Distribution [2], Sha256Digest
 //! - `source`    SourceFile [3], ProjectMeta
@@ -18,14 +18,18 @@
 //! - `graphs`    CallGraph [6], DataFlowGraph [7], PackageGraph [8], Confidence
 //! - `taint`     TaintSource [9], TaintSink [10]
 //! - `path`      ReachabilityPath [11], PathStep, Location
+//! - `rule`      RuleSpec [14], RuleId
+//! - `finding`   Finding [15], Evidence [16], Severity, RiskScore, Verdict [17]
 //! - `error`     CoreError
 
 pub mod ast;
 pub mod error;
+pub mod finding;
 pub mod graphs;
 pub mod ids;
 pub mod package;
 pub mod path;
+pub mod rule;
 pub mod source;
 pub mod symbols;
 pub mod taint;
@@ -33,6 +37,10 @@ pub mod taxonomy;
 
 pub use ast::{Ast, AstKind, AstNode, Span};
 pub use error::CoreError;
+pub use finding::{
+    Evidence, Finding, MALICIOUS_THRESHOLD, RiskScore, SUSPICIOUS_THRESHOLD, Severity, Snippet,
+    Verdict,
+};
 pub use graphs::{
     CallEdge, CallGraph, CallNode, CallNodeKind, Confidence, DataFlowGraph, FlowEdge, FlowEdgeKind,
     FlowNode, FlowNodeKind, PackageGraph,
@@ -40,6 +48,7 @@ pub use graphs::{
 pub use ids::{AstNodeId, FileId, SymbolId};
 pub use package::{Distribution, DistributionKind, Package, PackageName, Sha256Digest};
 pub use path::{Location, PathStep, PathStepKind, ReachabilityKind, ReachabilityPath};
+pub use rule::{RuleId, RuleSpec};
 pub use source::{ProjectMeta, SourceFile, SourceKind};
 pub use symbols::{ImportAlias, QualifiedName, Symbol, SymbolKind, SymbolTable};
 pub use taint::{TaintSink, TaintSinkKind, TaintSource, TaintSourceKind};
@@ -72,7 +81,13 @@ mod tests {
             type_name::<crate::AttackTechnique>(),
             type_name::<crate::ExecutionPhase>(),
             type_name::<crate::PhaseMap>(),
+            type_name::<crate::RuleSpec>(),
+            type_name::<crate::Finding>(),
+            type_name::<crate::Evidence>(),
+            type_name::<crate::Severity>(),
+            type_name::<crate::RiskScore>(),
+            type_name::<crate::Verdict>(),
         ];
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 21);
     }
 }
