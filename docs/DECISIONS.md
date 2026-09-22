@@ -773,6 +773,22 @@ empty — it is a fact about the file list, not about that file — and the call
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
 was applied meanwhile.
 
+- **2026-09-22, T-08 (literal folding) — the compression decoders in ADR-018 have no
+  implementation.** `fold::FOLDABLE` lists `zlib.decompress`, `gzip.decompress`,
+  `bz2.decompress` and `lzma.decompress` because ADR-018 names them, but `phylaxis-graph`
+  depends on none of the crates that could perform them: `flate2` is a workspace dependency
+  already (it is what `parse` uses for sdists) and would cover zlib and gzip, while bz2 and
+  lzma would each be a new third-party crate. Adding a dependency is a recorded decision, not
+  an implementation detail, so none was added. The base-32, base-85 and ascii-85 alphabets are
+  unimplemented too, for a different reason: no payload observed in the literature uses them.
+
+  **The conservative reading applied meanwhile:** a call to any of them returns `None`, which
+  is exactly the answer the folder gives for anything else it cannot decode, so no caller has
+  to distinguish *not foldable* from *not yet foldable*. The cost is a missed deobfuscation on
+  `b64decode(zlib.decompress(...))`, which is a real shape. `fold::UNIMPLEMENTED` lists them
+  and a test asserts the list stays a subset of `FOLDABLE`. Worth deciding before T-14 —
+  `flate2` alone would close the common case at no new supply-chain cost.
+
 - *(closed)* The T-06 `src/`-layout request was closed by **ADR-021** on 2026-09-22:
   importable top-level names are derived from the file list, root packages first, and a
   container directory is only seen through when the root holds no package at all.

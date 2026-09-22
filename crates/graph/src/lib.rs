@@ -9,6 +9,7 @@
 
 pub mod callgraph;
 pub mod error;
+pub mod fold;
 pub mod symbols;
 
 pub use error::GraphError;
