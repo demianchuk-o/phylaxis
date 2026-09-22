@@ -463,7 +463,7 @@ fn children_by_field(ast: &Ast, id: AstNodeId, field: &str) -> Vec<AstNodeId> {
 /// Escape sequences are left as written: this reads module names, which do not contain
 /// them, and decoding literals in general is literal folding's job (ADR-018). An f-string is
 /// refused outright — its value depends on names in scope, so it is not a literal.
-fn str_literal(raw: &str) -> Option<String> {
+pub(crate) fn str_literal(raw: &str) -> Option<String> {
     let quote_at = raw.find(['"', '\''])?;
     let prefix = &raw[..quote_at];
     if !prefix
