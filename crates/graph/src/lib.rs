@@ -10,6 +10,7 @@
 pub mod callgraph;
 pub mod error;
 pub mod fold;
+pub mod phases;
 pub mod symbols;
 
 pub use error::GraphError;
@@ -59,6 +60,28 @@ pub(crate) mod test_support {
         let cg =
             super::callgraph::build_call_graph(&asts, &mut symbols).expect("call graph builds");
         (symbols, cg)
+    }
+
+    /// The symbol, call-graph and phase stages.
+    pub(crate) fn phases_from_sources(
+        files: &[(&str, &str)],
+    ) -> (
+        SymbolTable,
+        phylaxis_core::CallGraph,
+        phylaxis_core::PhaseMap,
+    ) {
+        let asts = asts_from_sources(files);
+        let paths: Vec<&str> = files.iter().map(|(path, _)| *path).collect();
+        let discovered = phylaxis_parse::discover_top_level_modules(paths);
+        let top: Vec<&str> = discovered.iter().map(String::as_str).collect();
+        let meta = meta(&top);
+        let mut symbols =
+            super::symbols::build_symbol_table(&asts, &meta).expect("symbol table builds");
+        let calls =
+            super::callgraph::build_call_graph(&asts, &mut symbols).expect("call graph builds");
+        let phases = super::phases::build_phase_map(&asts, &symbols, &calls, &meta)
+            .expect("phase map builds");
+        (symbols, calls, phases)
     }
 
     /// The symbol stage alone.
