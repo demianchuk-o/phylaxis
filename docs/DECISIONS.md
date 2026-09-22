@@ -704,5 +704,18 @@ Three details worth stating:
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
 was applied meanwhile.
 
-- *(none open)* The T-03 extraction-scope request was closed by **ADR-020** on 2026-09-16:
+- **2026-09-22, T-06 (symbols) — how a distribution's importable top-level names are
+  discovered.** `build_symbol_table` names a module after its path relative to the
+  distribution root, which is wrong for the `src/` layout: `src/pkg/a.py` is the module
+  `pkg.a`, not `src.pkg.a`, and getting it wrong resolves every relative import inside that
+  file one level too deep. The stage strips a leading directory when `ProjectMeta::
+  top_level_modules` says the *next* component is importable and the first is not — the test
+  is the metadata, never the literal name `src`. **But nothing fills `top_level_modules`
+  yet**: `parse_pyproject` leaves it empty and the discovery from the file list is
+  unimplemented, so today the check never fires and `src/` layouts are misnamed. The
+  conservative reading applied meanwhile is to take the path exactly as written when the
+  metadata is empty, rather than to guess at directory names. Needs deciding before T-14,
+  where it changes numbers on real packages.
+
+- *(closed)* The T-03 extraction-scope request was closed by **ADR-020** on 2026-09-16:
   only `.py` and `pyproject.toml` are written, everything else becomes a manifest entry.

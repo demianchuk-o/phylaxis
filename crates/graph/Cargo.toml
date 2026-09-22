@@ -10,3 +10,8 @@ license.workspace = true
 phylaxis-core.workspace = true
 petgraph.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Tests build package graphs from inline Python; the parser is the only way to get an Ast.
+# A dev-dependency does not invert the runtime boundary (ARCHITECTURE.md).
+phylaxis-parse.workspace = true
