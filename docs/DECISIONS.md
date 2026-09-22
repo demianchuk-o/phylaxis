@@ -520,6 +520,14 @@ that carries kind, span, text slice and child indices.** Chosen. **Consequences.
 per file (acceptable: sdists are small); the parser backend is swappable by a recorded
 decision; the AST is trivially serialisable for snapshot tests.
 
+**Amended 2026-09-22.** `Ast` also carries `rel_path`, the file's path relative to the
+distribution root. The symbol stage derives a module's dotted name from that path
+(`pkg/sub.py` is `pkg.sub`) and the evidence renderer prints it, so both needed it, and the
+arena knew only a numeric `FileId`. The alternative was a side table from `FileId` to path,
+passed alongside the slice of `Ast`s. It was rejected because `FileId` *is* a position in
+that slice: a side table that drifts out of step with it produces wrong module names
+silently, where a field on the node cannot. The cost is one `String` per file.
+
 ---
 
 ## ADR-015 — `phylaxis-core` depends on `petgraph`

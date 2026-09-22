@@ -94,9 +94,16 @@ pub struct AstNode {
 
 /// The tree of one file: nodes in pre-order, root at index 0, plus the source text so
 /// that any node can be rendered.
+///
+/// WHY the path is here and not in a side table: `FileId` is a *position*, so a map from
+/// id to path that drifts out of step with the slice of `Ast`s is wrong silently rather
+/// than loudly. The symbol table derives a module's dotted name from this path and the
+/// evidence renderer prints it, and both want it without reaching back to the filesystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ast {
     pub file: FileId,
+    /// The file's path relative to the distribution root, as `SourceFile::rel_path`.
+    pub rel_path: String,
     pub text: String,
     pub nodes: Vec<AstNode>,
     /// Number of `Error` nodes, precomputed at lowering time.
@@ -161,6 +168,7 @@ mod tests {
         };
         Ast {
             file: FileId(0),
+            rel_path: "m.py".to_owned(),
             error_count: 0,
             nodes: vec![
                 node(0, AstKind::Module, None, vec![1], None, 0, 4),
