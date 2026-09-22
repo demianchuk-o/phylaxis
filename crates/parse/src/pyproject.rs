@@ -64,8 +64,10 @@ fn string_array(value: &str) -> Vec<String> {
     out
 }
 
-/// Extracts `build_backend` and `backend_path`. `top_level_modules` is left empty here;
-/// the extractor fills it from the file list.
+/// Extracts `build_backend` and `backend_path`. `top_level_modules` is left empty here: it
+/// is a fact about the file list, not about this file, and
+/// [`crate::discover_top_level_modules`] derives it (ADR-021). The caller assembling
+/// `ProjectMeta` fills it in.
 pub fn parse_pyproject(file: &SourceFile) -> Result<ProjectMeta, ParseError> {
     let text = file.text();
     let mut meta = ProjectMeta::default();

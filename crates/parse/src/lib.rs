@@ -11,6 +11,7 @@
 pub mod digest;
 pub mod error;
 pub mod extract;
+pub mod layout;
 pub mod pyproject;
 pub mod python;
 
@@ -19,5 +20,6 @@ pub use error::ParseError;
 pub use extract::{
     EntryKind, ExtractedTree, ManifestEntry, extract_sdist, load_directory, validate_entry,
 };
+pub use layout::discover_top_level_modules;
 pub use pyproject::parse_pyproject;
 pub use python::{parse_all, parse_python};

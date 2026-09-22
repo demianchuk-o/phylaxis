@@ -699,23 +699,71 @@ Three details worth stating:
 
 ---
 
+## ADR-021 — A distribution's importable names are derived from its file list
+
+**Date:** 2026-09-22. **Status:** accepted.
+
+**Context.** A module is named after its path relative to the distribution root, so the
+analyser has to know where that root effectively begins. For most projects it is the archive
+root; for the `src/` layout the packages sit one directory lower, and calling `src/pkg/a.py`
+the module `src.pkg.a` resolves every relative import inside it one level too deep. The
+imports then point at modules that do not exist, the call edges are never built, and the
+package is under-analysed silently — the tool reports fewer findings rather than an error.
+
+**Alternatives.**
+
+1. **Match the literal directory name `src`.** Rejected: it is a convention, not a rule.
+   `lib/` and `source/` are used too, and a project that genuinely ships a package called
+   `src` would be corrupted by it.
+2. **Read `[tool.setuptools] packages` / `package-dir` from `pyproject.toml`.** Authoritative
+   where it appears, because it is the project's own declaration. Rejected as the *only*
+   mechanism: a large share of sdists declare their layout in `setup.cfg` or in `setup.py`,
+   and `setup.py` cannot be executed (invariant 5). The answer would be right where it
+   applied and silently missing everywhere else, which is the failure mode that is hardest to
+   notice in an evaluation.
+3. **Derive it structurally from the file list.** Chosen.
+4. **Do nothing and document the miss.** Rejected: it costs recall on real packages for no
+   saving beyond about thirty lines.
+
+**Decision.** `parse::layout::discover_top_level_modules` returns the importable top-level
+names, from the extracted file list alone, by three rules applied in order:
+
+1. `X` for every `X/__init__.py` at the distribution root.
+2. **Only if rule 1 found nothing**, `X` for every `C/X/__init__.py`. A root holding no
+   package at all is the container layout's signature, and `C` is then a container directory.
+3. `X` for every root-level `X.py` other than `setup.py` — the single-module distribution.
+
+`symbols::build_symbol_table` drops a leading path component when the metadata says the
+*next* component is importable and the first is not. The test is always the derived set,
+never a directory name.
+
+**Why rule 2 is conditional.** Treating any non-package root directory as a container
+unconditionally would promote `tests/helpers/__init__.py` to the top-level name `helpers`,
+and `tests/helpers/util.py` would then be named `helpers.util` — a wrong name, produced
+quietly. The condition removes the case entirely: a project with a `tests/` directory also
+has its own package at the root, so rule 1 fires and rule 2 never runs.
+
+**Consequences.** The residual failures are misses, never wrong names, which is the direction
+this project takes everywhere uncertainty appears:
+
+- a distribution shipping both a root package and a `src/` tree keeps the `src.` prefix on
+  the second one;
+- a PEP 420 namespace package has no `__init__.py` and is not detected at all.
+
+Both lose call edges; neither invents one. `parse_pyproject` still leaves `top_level_modules`
+empty — it is a fact about the file list, not about that file — and the caller assembling
+`ProjectMeta` fills it in.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
 was applied meanwhile.
 
-- **2026-09-22, T-06 (symbols) — how a distribution's importable top-level names are
-  discovered.** `build_symbol_table` names a module after its path relative to the
-  distribution root, which is wrong for the `src/` layout: `src/pkg/a.py` is the module
-  `pkg.a`, not `src.pkg.a`, and getting it wrong resolves every relative import inside that
-  file one level too deep. The stage strips a leading directory when `ProjectMeta::
-  top_level_modules` says the *next* component is importable and the first is not — the test
-  is the metadata, never the literal name `src`. **But nothing fills `top_level_modules`
-  yet**: `parse_pyproject` leaves it empty and the discovery from the file list is
-  unimplemented, so today the check never fires and `src/` layouts are misnamed. The
-  conservative reading applied meanwhile is to take the path exactly as written when the
-  metadata is empty, rather than to guess at directory names. Needs deciding before T-14,
-  where it changes numbers on real packages.
+- *(closed)* The T-06 `src/`-layout request was closed by **ADR-021** on 2026-09-22:
+  importable top-level names are derived from the file list, root packages first, and a
+  container directory is only seen through when the root holds no package at all.
 
 - *(closed)* The T-03 extraction-scope request was closed by **ADR-020** on 2026-09-16:
   only `.py` and `pyproject.toml` are written, everything else becomes a manifest entry.

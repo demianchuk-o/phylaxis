@@ -624,6 +624,42 @@ mod tests {
         );
     }
 
+    // The loop closed end to end: the names `parse` derives from the file list are the ones
+    // that decide whether a leading directory is part of the module name. Without this, the
+    // two halves of ADR-021 are only tested against each other's assumptions.
+    #[test]
+    fn discovered_top_level_names_drive_the_src_layout_strip() {
+        let files = [
+            ("src/pkg/__init__.py", ""),
+            (
+                "src/pkg/a.py",
+                "from .b import helper
+",
+            ),
+            (
+                "src/pkg/b.py",
+                "def helper():
+    pass
+",
+            ),
+        ];
+        let discovered =
+            phylaxis_parse::discover_top_level_modules(files.iter().map(|(path, _)| *path));
+        assert_eq!(discovered, vec!["pkg".to_owned()]);
+
+        let top: Vec<&str> = discovered.iter().map(String::as_str).collect();
+        let t = symbols_from_sources_with(&files, &top);
+        // files sorted: src/pkg/__init__.py=0, src/pkg/a.py=1, src/pkg/b.py=2
+        assert_eq!(
+            canonicalize(&t, FileId(1), "helper").as_str(),
+            "pkg.b.helper"
+        );
+        assert!(
+            t.lookup_qualified(&QualifiedName::new("pkg.b.helper"))
+                .is_some()
+        );
+    }
+
     // Two lambdas in one scope must not collide in `by_qualified`.
     #[test]
     fn lambdas_are_numbered_per_file() {
