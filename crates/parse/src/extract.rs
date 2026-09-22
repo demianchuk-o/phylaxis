@@ -679,6 +679,8 @@ pub fn load_directory(dir: &Path, opts: &ExtractOptions) -> Result<ExtractedTree
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     // SAFETY, first tier of the test contracts: no entry may escape the extraction root.
@@ -790,7 +792,7 @@ mod tests {
     fn tar_slip_archive_is_rejected_whole() {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/malicious/tar_slip.tar.gz");
-        let result = extract_sdist(&fixture, &ExtractOptions::default());
+        let result = locked_extract(&fixture, &ExtractOptions::default());
         assert!(matches!(
             result,
             Err(ParseError::PathTraversal { .. })
@@ -811,7 +813,7 @@ mod tests {
             ..ExtractOptions::default()
         };
         assert!(matches!(
-            extract_sdist(&fixture, &opts),
+            locked_extract(&fixture, &opts),
             Err(ParseError::TooManyEntries { limit: 1 })
         ));
     }
@@ -821,7 +823,7 @@ mod tests {
     fn extracted_files_are_sorted_and_rooted_at_the_distribution() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/benign/setup_py_plain.tar.gz");
-        let tree = extract_sdist(&fixture, &ExtractOptions::default()).unwrap();
+        let tree = locked_extract(&fixture, &ExtractOptions::default()).unwrap();
         assert!(tree.is_temporary());
         let paths: Vec<&str> = tree.files.iter().map(|f| f.rel_path.as_str()).collect();
         let mut sorted = paths.clone();
@@ -842,6 +844,7 @@ mod tests {
     fn a_rejected_archive_creates_no_extraction_directory() {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/malicious/tar_slip.tar.gz");
+        let _guard = census_guard();
         let before = temp_children();
         assert!(extract_sdist(&fixture, &ExtractOptions::default()).is_err());
         let after = temp_children();
@@ -856,19 +859,48 @@ mod tests {
     fn the_extraction_directory_is_removed_on_drop() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/benign/setup_py_plain.tar.gz");
-        let tree = extract_sdist(&fixture, &ExtractOptions::default()).unwrap();
+        let tree = locked_extract(&fixture, &ExtractOptions::default()).unwrap();
         let root = tree.root.clone();
         assert!(root.exists());
         drop(tree);
         assert!(!root.exists(), "the temporary root outlived its tree");
     }
 
+    /// Serialises every test that creates an extraction directory.
+    ///
+    /// `a_rejected_archive_creates_no_extraction_directory` works by counting this process's
+    /// extraction directories either side of a rejected archive, and the test harness runs
+    /// tests on several threads. Without this, a sibling test extracting a *valid* archive at
+    /// the same moment changes that count, and the census test fails an assertion about a call
+    /// it had nothing to do with. The lock is taken around the extraction, and held across the
+    /// whole census by the test that takes the census.
+    static EXTRACTING: Mutex<()> = Mutex::new(());
+
+    fn census_guard() -> std::sync::MutexGuard<'static, ()> {
+        // A sibling test that panics while holding the lock poisons it; the data is `()`, so
+        // there is nothing to be suspicious of and recovering keeps one failure from
+        // cascading into every other test in the file.
+        EXTRACTING.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn locked_extract(path: &Path, opts: &ExtractOptions) -> Result<ExtractedTree, ParseError> {
+        let _guard = census_guard();
+        extract_sdist(path, opts)
+    }
+
+    /// This process's extraction directories, by the exact name shape `fresh_temp_dir` makes.
+    ///
+    /// The process id is part of the filter, not decoration: the system temp directory is
+    /// shared, cargo runs the workspace's test binaries in parallel, and other crates put
+    /// their own `phylaxis-`-prefixed directories there. Matching the prefix alone counts
+    /// theirs too, and the census then measures the build rather than this function.
     fn temp_children() -> Vec<std::ffi::OsString> {
+        let mine = format!("phylaxis-{}-", std::process::id());
         let mut v: Vec<_> = fs::read_dir(std::env::temp_dir())
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
                     .map(|e| e.file_name())
-                    .filter(|n| n.to_string_lossy().starts_with("phylaxis-"))
+                    .filter(|n| n.to_string_lossy().starts_with(&mine))
                     .collect()
             })
             .unwrap_or_default();
@@ -883,7 +915,7 @@ mod tests {
     fn only_python_source_reaches_the_extraction_root() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/benign/setup_py_plain.tar.gz");
-        let tree = extract_sdist(&fixture, &ExtractOptions::default()).unwrap();
+        let tree = locked_extract(&fixture, &ExtractOptions::default()).unwrap();
 
         let mut written = 0usize;
         for entry in walkdir::WalkDir::new(&tree.root).follow_links(false) {
@@ -915,7 +947,7 @@ mod tests {
     fn contains_path_spans_both_analysed_and_recorded_members() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/benign/setup_py_plain.tar.gz");
-        let tree = extract_sdist(&fixture, &ExtractOptions::default()).unwrap();
+        let tree = locked_extract(&fixture, &ExtractOptions::default()).unwrap();
         assert!(tree.contains_path("setup.py"), "an analysed member");
         assert!(tree.contains_path("README.md"), "a recorded member");
         assert!(
