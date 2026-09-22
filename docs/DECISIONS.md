@@ -182,6 +182,18 @@ lower-confidence findings). ADR-007 makes the choice explicit.
 - The error analysis in EVALUATION.md has a "resolution gap" category so the cost of this
   approximation is measured, not guessed.
 
+**Amended 2026-09-22, when the stage was implemented.** Two points the seven steps did not
+settle:
+
+- **Classes are call-graph nodes, and a call resolving to a class is redirected to that
+  class's `__init__` when it has one.** `C()` is a call, and stopping it at the class node
+  would make everything the constructor reaches unreachable — which is the wrong answer in the
+  direction that matters, since `__init__` is where a malicious package puts work that runs on
+  construction. A class with no `__init__` keeps the edge to itself, correctly a leaf.
+- **A call on the result of another call — `make()()`, `f()[0]()` — is `Dynamic`.** There is no
+  name at that call site at all, and step 5's fallback needs an attribute name to fan out over.
+  Guessing would add an edge that no reading of the source supports.
+
 ---
 
 ## ADR-006 — Sources, sinks, taint-preserving transforms, and no sanitiser
