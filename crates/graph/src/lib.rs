@@ -8,19 +8,46 @@
 //! phases → reachability. `build_package_graph` runs them in that order.
 
 pub mod callgraph;
+pub mod dataflow;
 pub mod error;
 pub mod fold;
 pub mod phases;
+pub mod reach;
 pub mod symbols;
 
 pub use error::GraphError;
+pub use reach::{ReachLimits, control_paths, data_paths, find_sinks, find_sources};
+
+use phylaxis_core::{Ast, PackageGraph, ProjectMeta};
+
+/// Builds the complete package graph for one distribution. `asts` are in `FileId` order.
+///
+/// Postconditions: node and edge indices are canonical (files by path, then source order),
+/// so two calls on equal inputs produce structurally identical graphs.
+pub fn build_package_graph(asts: &[Ast], meta: &ProjectMeta) -> Result<PackageGraph, GraphError> {
+    let mut symbols = symbols::build_symbol_table(asts, meta)?;
+    // `&mut`: the call-graph stage is what discovers external and dynamic callees, and
+    // `CallNode` addresses every target by `SymbolId`, so those targets have to become
+    // symbols. `SymbolKind::External` and `SymbolKind::Dynamic` exist for exactly this.
+    let call_graph = callgraph::build_call_graph(asts, &mut symbols)?;
+    let dfg = dataflow::build_data_flow(asts, &symbols, &call_graph)?;
+    let phases = phases::build_phase_map(asts, &symbols, &call_graph, meta)?;
+    Ok(PackageGraph {
+        symbols,
+        call_graph,
+        dfg,
+        phases,
+    })
+}
 
 /// Test support: parse inline sources and build the stage under test.
 ///
 /// Only compiled for tests, where `phylaxis-parse` is a dev-dependency.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use phylaxis_core::{Ast, FileId, ProjectMeta, SourceFile, SourceKind, SymbolTable};
+    use phylaxis_core::{
+        Ast, FileId, PackageGraph, ProjectMeta, SourceFile, SourceKind, SymbolTable,
+    };
 
     /// `files` are `(rel_path, source)` pairs; they are sorted by path like the extractor
     /// would, so `FileId`s follow sorted order.
@@ -45,6 +72,12 @@ pub(crate) mod test_support {
             top_level_modules: top_level.iter().map(|m| (*m).to_owned()).collect(),
             ..ProjectMeta::default()
         }
+    }
+
+    /// The whole pipeline, for the stages that consume a finished `PackageGraph`.
+    pub(crate) fn graph_from_sources(files: &[(&str, &str)]) -> PackageGraph {
+        super::build_package_graph(&asts_from_sources(files), &meta(&["pkg"]))
+            .expect("graph builds")
     }
 
     /// The symbol and call-graph stages, for the block that introduces the call graph.
