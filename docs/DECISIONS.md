@@ -789,6 +789,27 @@ was applied meanwhile.
   and a test asserts the list stays a subset of `FOLDABLE`. Worth deciding before T-14 —
   `flate2` alone would close the common case at no new supply-chain cost.
 
+- **2026-09-23, T-09 (data flow and reachability) — three parts of the source/sink
+  contract are not implemented.** All three need a *value* or the *syntax* around a call,
+  where the rest of the matching needs only a name.
+
+  1. **Literal-valued sources.** `SensitiveFile` (a path literal passed to a file API),
+     `DecodedLiteral` (an expression that folds through a decoder) and `SuspiciousLiteral`
+     (a URL, raw IP, shell one-liner or wallet address) match nothing. The literal's value
+     is already in the graph — a `Literal` node's label is its unquoted value — so what is
+     missing is the matching, which belongs with the rule catalogue (T-11).
+  2. **`SinkPattern::arg`.** A sink call has one external-parameter node that every
+     argument flows into, so a path into *any* argument counts. Narrowing it needs one such
+     node per argument position.
+  3. **`ReachabilityPath::conditional`.** Always `false`: deciding it needs the `if` around
+     the sink, and `PackageGraph` carries no syntax.
+
+  **The conservative reading applied meanwhile:** (1) fails toward silence for those three
+  kinds, which is the direction ADR-007 warns against, so it has to close before T-14 or
+  the rules that use them are reported as unimplemented rather than as measured. (2) fails
+  toward a finding, as ADR-007 asks of the graph. (3) only affects severity; no path is
+  added or removed by it.
+
 - *(closed)* The T-06 `src/`-layout request was closed by **ADR-021** on 2026-09-22:
   importable top-level names are derived from the file list, root packages first, and a
   container directory is only seen through when the root holds no package at all.
