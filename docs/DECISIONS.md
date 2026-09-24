@@ -253,6 +253,15 @@ sanitisers (escaping) that neutralise taint. The question was whether that triad
   `RulesetVersion`, and reproduced as a table in RULES.md.
 - Length-of-path and transform-count are attributes of `Evidence` (auditor readability).
 
+**Amended 2026-09-24, when the literal-valued sources were implemented.** Reading carries
+taint. `open` and `io.open` are taint-preserving, and so are the methods `read`, `readline`,
+`readlines`, `read_text`, `read_bytes` and `getvalue` on any value. Without them a
+`SensitiveFile` source could never reach anything, since the secret is what the path
+*opens*, not the path itself, and `urlopen(u).read()` lost the response it was reading.
+This over-approximates in ADR-007's direction: a file opened by a tainted *name* now taints
+its content, so `open(os.environ["CONFIG"]).read()` sent to a server is reported as
+environment exfiltration.
+
 ---
 
 ## ADR-007 — Over-approximation policy
@@ -599,6 +608,25 @@ Chosen. **Consequence.** `graph::fold` is pure and total: it never calls out, ne
 beyond the bound, and on any non-literal input returns `None`. The safety test for this is in
 the first tier of the test contracts.
 
+**Amended 2026-09-24: detection does not go through the folder.** A `DecodedLiteral` source
+is matched in the data-flow graph as the result of a call to a decoder
+(`reach::DECODERS`: the `base64`, `binascii`, `codecs.decode`, `bytes.fromhex` and
+decompressor entries of the list above) whose every input, traced back, starts at a constant.
+Two facts forced the change. The payload nearly always passes through a variable first
+(`_BLOB = "…"; exec(b64decode(_BLOB))`, which is how the fixtures are written), and folding
+sees one expression at a time, so it returned `None` on every positive fixture. And the
+graph's callee labels are already canonical, so `import base64 as b` resolves without the
+folder needing an alias table. Constant means a literal, or a binding whose value produced
+no data-flow node (a list of numbers). Anything else at a leaf (a call result, an external
+read, an uncalled parameter) is data from outside, and a decoder over it is a dropper's shape,
+not an obfuscated literal.
+
+What is lost: `chr`-joins, reversal and concatenation with no decoder in the chain are not
+`DecodedLiteral`. They hide nothing from a reader who reads the code, and the fixture that
+exercises them (`chr_join_exec`) feeds a `b64decode`, which is what is matched. `fold_literal`
+stays as a tested, bounded function with no caller in the detection path; its natural use
+is rendering the decoded text in evidence, which needs the source text the CLI holds.
+
 ---
 
 
@@ -793,7 +821,8 @@ was applied meanwhile.
   contract are not implemented.** All three need a *value* or the *syntax* around a call,
   where the rest of the matching needs only a name.
 
-  1. **Literal-valued sources.** `SensitiveFile` (a path literal passed to a file API),
+  1. *(closed 2026-09-24, see ADR-018 amended and ADR-006 amended)* **Literal-valued
+     sources.** `SensitiveFile` (a path literal passed to a file API),
      `DecodedLiteral` (an expression that folds through a decoder) and `SuspiciousLiteral`
      (a URL, raw IP, shell one-liner or wallet address) match nothing. The literal's value
      is already in the graph — a `Literal` node's label is its unquoted value — so what is
@@ -810,8 +839,10 @@ was applied meanwhile.
   toward a finding, as ADR-007 asks of the graph. (3) only affects severity; no path is
   added or removed by it.
 
-- **2026-09-24, T-08 (literal folding) — callee names are matched as written, not through
-  the alias table.** `fold_literal` takes an expression and nothing else, so it recognises
+- *(closed 2026-09-24 by the ADR-018 amendment)* **T-08 — callee names are matched as
+  written, not through the alias table.** Detection no longer goes through `fold_literal`,
+  and the data-flow graph's callee labels are canonical. The gap remains in `fold_literal`
+  itself and matters only if it is later used on the detection path. Original text: `fold_literal` takes an expression and nothing else, so it recognises
   `base64.b64decode(...)` but not `b.b64decode(...)` after `import base64 as b`, nor a bare
   `b64decode(...)` after `from base64 import b64decode`. Obfuscated packages alias imports
   routinely, so this is a real miss, not an edge case. The call graph already canonicalises
@@ -823,6 +854,27 @@ was applied meanwhile.
   gives `fold_literal` its first caller (the literal-valued sources above, T-11) — either the
   caller canonicalises callee text before folding, or `fold_literal` takes the file's alias
   table. A test with `import base64 as b` pins it.
+
+- **2026-09-24, T-11 (rule engine) — what the catalogue cannot yet express.**
+
+  1. **PHX-INS-003's target is a read, not a sink.** RULES.md defines it as a definition
+     containing a `SensitiveFile` read reachable from an install root; `RuleSpec` has only
+     sink kinds. The engine recognises the rule by id and targets the reads; the `sinks`
+     field on that rule is not consulted. Closing it needs a `ControlTarget` field (sink kinds
+     or source kinds) on `RuleSpec`. `Environment` reads are not targeted at all, because the
+     key of `os.environ['CFLAGS']` is not in the graph and so `BUILD_ENV_ALLOWLIST` could not
+     be applied.
+  2. **`<write:…>` persistence sinks match nothing.** They name a path an `open(…, "w")` or
+     `write_text` writes to, and `find_sinks` matches callee names only. PHX-PER-001 cannot
+     fire until they are matched the way `SensitiveFile` is. `winreg.SetValueEx` is the
+     only persistence sink that works.
+  3. **Evidence snippets are empty.** The package graph carries spans, not source text; the
+     CLI holds the files and is the natural place to cut them.
+
+  **The conservative reading applied meanwhile:** (1) matches RULES.md's formal row and fails
+  toward silence on install-time environment reads, which INS-001 and EXF-001 still catch when
+  the value goes anywhere. (2) fails toward silence for PER-001 and must close before T-14 or
+  that rule is reported as unimplemented. (3) affects the report, not the verdict.
 
 - *(closed)* The T-06 `src/`-layout request was closed by **ADR-021** on 2026-09-22:
   importable top-level names are derived from the file list, root packages first, and a

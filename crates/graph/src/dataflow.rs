@@ -42,6 +42,11 @@ pub const TAINT_PRESERVING: &[(&str, bool)] = &[
     ("os.path", false),
     ("pathlib", false),
     ("urllib.parse", false),
+    // Opening a file carries the path's taint into the handle, and `read` (below) carries
+    // it into the content: a `SensitiveFile` source is a path, and the secret is what the
+    // path opens (ADR-006). An over-approximation: the handle is not the path.
+    ("open", false),
+    ("io.open", false),
     ("json", false),
     ("pickle", true),
     ("marshal", true),
@@ -101,6 +106,15 @@ const PRESERVING_METHODS: &[&str] = &[
     "center",
     "hex",
     "copy",
+    // Reading from a handle or a response: `open(p).read()`, `urlopen(u).read()`,
+    // `Path(p).read_text()`. Without these a file's or a response's content never carries
+    // what it was read from.
+    "read",
+    "readline",
+    "readlines",
+    "read_text",
+    "read_bytes",
+    "getvalue",
     "get",
     "pop",
     "items",
