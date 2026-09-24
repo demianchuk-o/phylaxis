@@ -1043,6 +1043,7 @@ version = "0.1.0"
 dependencies = [
  "phylaxis-core",
  "phylaxis-graph",
+ "phylaxis-parse",
  "serde",
  "serde_json",
  "thiserror",
