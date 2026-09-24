@@ -189,7 +189,7 @@ of thing worth pre-empting in writing, since a reviewer may well ask.
     before they are committed. A question about these has to be answerable from memory.
   - **Tier 2 — everything else.** Plumbing, parsing, caching, CLI, bindings, fixtures, the
     rule catalogue as data. The implementer commits these once green and writes a **defence
-    card** to `../notes/DEFENSE/<block>.md`: what it does, the one design choice inside it,
+    card** to `../thesis/notes/DEFENSE/<block>.md`: what it does, the one design choice inside it,
     what would break it, and the questions it invites with their answers. The card is the
     account; the code is behind it if the card raises something.
 

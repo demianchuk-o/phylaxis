@@ -810,6 +810,20 @@ was applied meanwhile.
   toward a finding, as ADR-007 asks of the graph. (3) only affects severity; no path is
   added or removed by it.
 
+- **2026-09-24, T-08 (literal folding) — callee names are matched as written, not through
+  the alias table.** `fold_literal` takes an expression and nothing else, so it recognises
+  `base64.b64decode(...)` but not `b.b64decode(...)` after `import base64 as b`, nor a bare
+  `b64decode(...)` after `from base64 import b64decode`. Obfuscated packages alias imports
+  routinely, so this is a real miss, not an edge case. The call graph already canonicalises
+  callee names through the alias table (`symbols::canonicalize`, ADR-005); the folder never
+  received that step because it had no caller when it was written.
+
+  **The conservative reading applied meanwhile:** an aliased decoder returns `None`, which
+  fails toward silence on the `DecodedLiteral` source. It must close in the same block that
+  gives `fold_literal` its first caller (the literal-valued sources above, T-11) — either the
+  caller canonicalises callee text before folding, or `fold_literal` takes the file's alias
+  table. A test with `import base64 as b` pins it.
+
 - *(closed)* The T-06 `src/`-layout request was closed by **ADR-021** on 2026-09-22:
   importable top-level names are derived from the file list, root packages first, and a
   container directory is only seen through when the root holds no package at all.
