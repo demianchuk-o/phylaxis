@@ -5,10 +5,12 @@
 //! catalogue is a static table and the ruleset version is a constant (invariant 6).
 
 pub mod catalogue;
+pub mod engine;
 pub mod error;
 
 pub use catalogue::{
     RULES, RULESET_VERSION, RuleSummary, SINK_PATTERNS, SOURCE_PATTERNS, catalogue, find_rule,
     summaries,
 };
+pub use engine::{evaluate, evaluate_rule, score_package};
 pub use error::RulesError;

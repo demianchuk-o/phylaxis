@@ -190,7 +190,7 @@ source of truth; the tables below describe them.
 
 | | |
 |---|---|
-| Catches | A `SensitiveFile` or `Environment` source reachable from an install root, even without a sink (the read alone at install time is a capability that has no legitimate reason). |
+| Catches | A `SensitiveFile` read reachable from an install root, even without a sink (the read alone at install time is a capability that has no legitimate reason). `Environment` reads are not targeted yet: the variable's name is not in the graph, so the allow-list below cannot be applied (open request, DECISIONS.md). |
 | Technique | Execution: **install**; objective: exfiltration precursor. |
 | Sources → sinks | `PhaseRoot(Install)` → definition containing a `SensitiveFile` read. `Control`. |
 | Severity | Medium |
