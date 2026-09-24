@@ -153,6 +153,12 @@ TARGETS = {
     "benign/setup_py_plain.tar.gz": lambda: build_sdist(
         os.path.join(HERE, "benign", "setup_py_plain"), "setup_py_plain-1.0"
     ),
+    # The sdist the end-to-end tests scan for determinism, identity and caching. A
+    # `{name}-{version}` filename, because that is where the report's distribution identity
+    # comes from (PEP 625).
+    "malicious/setup_py_exfil-1.0.tar.gz": lambda: build_sdist(
+        os.path.join(HERE, "malicious", "setup_py_exfil"), "setup_py_exfil-1.0"
+    ),
     "malicious/tar_slip.tar.gz": build_tar_slip,
     "benign/wheel_only-1.0-py3-none-any.whl": build_wheel,
 }

