@@ -978,7 +978,9 @@ dependencies = [
  "phylaxis-parse",
  "phylaxis-rules",
  "rayon",
+ "serde",
  "serde_json",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
