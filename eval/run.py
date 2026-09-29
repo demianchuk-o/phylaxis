@@ -13,6 +13,10 @@ unpacked into ``$PHYLAXIS_EVAL_WORK`` (default ``<data>/unpacked``), scanned as 
 and deleted before the next one. That folder is the only place a sample ever exists as
 plain files, which is why it is the one folder an antivirus exclusion has to cover.
 
+Each sample is scanned in a worker process of its own (``--jobs`` at a time), under a
+``--timeout``. A scan that aborts, runs out of memory or hangs costs its own row, marked as
+an error, and never the run.
+
 Nothing here imports or runs a sample: the scanner reads files, and so does this script.
 """
 
@@ -23,7 +27,10 @@ import json
 import os
 import posixpath
 import shutil
+import subprocess
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 import zipfile
 from pathlib import Path
 
@@ -106,6 +113,34 @@ def scan_entry(entry: dict, mode: str) -> dict:
     return row
 
 
+def isolated(entry: dict, mode: str, timeout: float) -> dict:
+    """`scan_entry` in a fresh worker process. The scanner is native code: an abort or an
+    out-of-memory kill cannot be caught in-process, and would end the whole run."""
+    row = {k: entry.get(k) for k in ("id", "label", "source", "name", "version")}
+    start = time.perf_counter()
+    try:
+        done = subprocess.run(
+            [sys.executable, __file__, "--worker", mode],
+            input=json.dumps(entry),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        if entry.get("source") == "datadog":
+            shutil.rmtree(WORK / entry["id"][:16], ignore_errors=True)
+        row.update(error=f"timeout after {timeout:g} s", seconds=round(time.perf_counter() - start, 4))
+        return row
+    lines = done.stdout.strip().splitlines()
+    if done.returncode != 0 or not lines:
+        if entry.get("source") == "datadog":
+            shutil.rmtree(WORK / entry["id"][:16], ignore_errors=True)
+        tail = (done.stderr.strip().splitlines() or ["no output"])[-1]
+        row.update(error=f"worker exited {done.returncode}: {tail[:200]}", seconds=round(time.perf_counter() - start, 4))
+        return row
+    return json.loads(lines[-1])
+
+
 def metrics(rows: list[dict]) -> dict:
     """EVALUATION.md §4. Errored and skipped inputs are reported and left out of the
     confusion matrix, never counted as a pass or a miss."""
@@ -136,15 +171,23 @@ def metrics(rows: list[dict]) -> dict:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--split", choices=["dev", "test"], default="dev")
+    p.add_argument("--jobs", type=int, default=os.cpu_count() or 1, help="worker processes at a time")
+    p.add_argument("--timeout", type=float, default=300.0, help="seconds per sample")
+    p.add_argument("--worker", metavar="MODE", help=argparse.SUPPRESS)
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--mode", choices=list("ABCD"), default="D")
     mode.add_argument("--all-modes", action="store_true")
     args = p.parse_args()
+    if args.worker:
+        # One sample from stdin, one row to stdout: the unit `isolated` runs in a process.
+        print(json.dumps(scan_entry(json.loads(sys.stdin.read()), args.worker)))
+        return
 
     entries = [e for e in json.loads((HERE / "manifest.json").read_text(encoding="utf-8"))["entries"] if e.get("split") == args.split]
     (DATA / "results").mkdir(parents=True, exist_ok=True)
     for m in ("ABCD" if args.all_modes else args.mode):
-        rows = [scan_entry(e, m) for e in entries]
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+            rows = list(pool.map(lambda e, m=m: isolated(e, m, args.timeout), entries))
         out = DATA / "results" / f"{args.split}-{m}.jsonl"
         out.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
         print(f"== {args.split} mode {m} ({out})")
