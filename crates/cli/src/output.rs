@@ -42,15 +42,17 @@ pub fn to_json(report: &ScanReport) -> Result<String, OutputError> {
 pub fn to_text(report: &ScanReport) -> String {
     use std::fmt::Write as _;
     // Writing into a `String` cannot fail, hence the discarded results below.
-    let mut out = format!(
-        "{}: {} (risk {:.2})",
-        report.source,
-        name(&report.verdict),
-        report.risk.value()
-    );
-    if let Some(reason) = &report.skipped {
-        let _ = write!(out, ", skipped: {}", skip_text(reason));
-    }
+    // A skipped input was not analysed, so it has no verdict to print: "clean" there would
+    // read as a result.
+    let mut out = match &report.skipped {
+        Some(reason) => format!("{}: not scanned ({})", report.source, skip_text(reason)),
+        None => format!(
+            "{}: {} (risk {:.2})",
+            report.source,
+            name(&report.verdict),
+            report.risk.value()
+        ),
+    };
     out.push('\n');
     for (i, f) in report.findings.iter().enumerate() {
         let _ = writeln!(
@@ -95,7 +97,7 @@ pub(crate) fn name<T: serde::Serialize>(v: &T) -> String {
 
 /// `SkipReason` is serialised as `{"reason": …, "detail": …}`; the text form is the reason,
 /// plus the detail when there is one.
-fn skip_text(reason: &SkipReason) -> String {
+pub fn skip_text(reason: &SkipReason) -> String {
     let v = serde_json::to_value(reason).unwrap_or_default();
     let r = v["reason"].as_str().unwrap_or("?");
     match v["detail"].as_str() {
@@ -156,9 +158,10 @@ mod tests {
         ));
     }
 
+    // A skipped input has no verdict: the text says it was not scanned, never "clean".
     #[test]
-    fn text_starts_with_source_and_verdict() {
+    fn text_of_a_skipped_input_says_not_scanned() {
         let t = to_text(&report());
-        assert!(t.starts_with("x.whl: clean"), "{t}");
+        assert!(t.starts_with("x.whl: not scanned (not_an_sdist"), "{t}");
     }
 }

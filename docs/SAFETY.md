@@ -51,13 +51,19 @@ hostile archive is not something later stages should be asked to reason about, a
 skipped the bad file and analysed the rest" is how a scanner ends up reporting *clean* on a
 package built to be half-processed.
 
+The refusal must not read as a pass either. A refused archive is reported as **not
+scanned**, never with a verdict, and makes the command exit 3, not 0. Otherwise one `../`
+entry or one symlink added to a package would carry it through a CI gate: the whole-archive
+rule turns every such entry into a way to be skipped, so being skipped has to fail.
+
 The temporary root is deleted on drop only when phylaxis created it. When the user points
 the tool at a directory they already own, that flag is false and nothing is ever removed — a
 scanner must be structurally incapable of deleting a source tree because a value went out of
 scope.
 
-*Enforced at:* `parse::extract::validate_entry`. *Proven by:* `parse::extract::tests::*` and
-`e2e_safety.rs`, over `fixtures/malicious/tar_slip.tar.gz`, which contains `../../evil.py`,
+*Enforced at:* `parse::extract::validate_entry`; the exit code in `cli::scan_command`.
+*Proven by:* `parse::extract::tests::*`, `cli::tests::a_refused_archive_is_an_error_not_clean`
+and `e2e_safety.rs`, over `fixtures/malicious/tar_slip.tar.gz`, which contains `../../evil.py`,
 `/abs/evil.py`, and a symlink to `/etc/passwd`.
 
 ### G3 — Nothing inside a package can cause network traffic

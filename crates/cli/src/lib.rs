@@ -22,8 +22,13 @@ pub mod exit {
     /// At least one scanned distribution reached `Verdict::Suspicious` or above.
     pub const FLAGGED: i32 = 1;
     pub const USAGE: i32 = 2;
-    /// A scan could not be completed (I/O, corrupt archive). Findings of other inputs in
+    /// A scan could not be completed (I/O, corrupt archive), or an input was not scanned at
+    /// all: a wheel, or an archive refused by safe extraction. Findings of other inputs in
     /// the same batch are still printed.
+    ///
+    /// WHY a refused archive is an error and not clean: extraction refuses a whole archive
+    /// with one path-traversal or link entry (SAFETY.md G2), so exit 0 there would let any
+    /// package through a CI gate by adding one such entry.
     pub const ERROR: i32 = 3;
 }
 
@@ -94,6 +99,14 @@ fn scan_command(args: &ScanArgs) -> i32 {
                 continue;
             }
         }
+        if let Some(reason) = &report.skipped {
+            eprintln!(
+                "phylaxis: {}: not scanned: {}",
+                path.display(),
+                output::skip_text(reason)
+            );
+            failed = true;
+        }
         flagged |= report.is_flagged();
     }
     if failed {
@@ -161,6 +174,20 @@ mod tests {
             exit::USAGE
         );
         assert_eq!(run(vec!["phylaxis".into()]), exit::USAGE);
+    }
+
+    // A refused archive must fail a CI gate: one `../` entry is all it takes to make
+    // extraction refuse a package, so exit 0 there would be a way past the scanner.
+    #[test]
+    fn a_refused_archive_is_an_error_not_clean() {
+        let slip = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/malicious/tar_slip.tar.gz"
+        );
+        assert_eq!(
+            run(vec!["phylaxis".into(), "scan".into(), slip.into()]),
+            exit::ERROR
+        );
     }
 
     #[test]
