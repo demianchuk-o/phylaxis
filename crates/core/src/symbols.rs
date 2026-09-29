@@ -54,6 +54,9 @@ pub enum SymbolKind {
     External,
     /// A callee that could not be resolved even to a name (ADR-005 step 7).
     Dynamic,
+    /// The call graph's stand-in for "any of these candidates": a call resolved by name
+    /// alone to many definitions goes to one of these, and it goes to each candidate.
+    FanOut,
 }
 
 /// [5] A named program entity.
@@ -95,6 +98,19 @@ pub struct SymbolTable {
     /// The `<module>` symbol of each file.
     pub module_of_file: BTreeMap<FileId, SymbolId>,
     pub file_paths: BTreeMap<FileId, String>,
+    /// `(scope, name) → the last definition (function, method, lambda or class) of that name
+    /// bound directly in that scope`. Maintained by `push`.
+    ///
+    /// WHY an index: resolving a call used to scan every symbol at every level of the scope
+    /// chain, and the any-callee candidates scanned every symbol again. On a package with
+    /// 68 000 symbols and 600 000 calls that was most of the scan time. Symbols are never
+    /// modified after `push`, so an index kept there cannot go stale.
+    #[serde(skip)]
+    pub definitions_in_scope: BTreeMap<(SymbolId, String), SymbolId>,
+    /// `name → every function, method or lambda of that name`, in id order. Maintained by
+    /// `push`; see `definitions_named`.
+    #[serde(skip)]
+    pub definitions_by_name: BTreeMap<String, Vec<SymbolId>>,
 }
 
 impl SymbolTable {
@@ -111,6 +127,23 @@ impl SymbolTable {
         let id = SymbolId(self.symbols.len() as u32);
         symbol.id = id;
         self.by_qualified.insert(symbol.qualified.clone(), id);
+        let callable = matches!(
+            symbol.kind,
+            SymbolKind::Function | SymbolKind::Method | SymbolKind::Lambda
+        );
+        if let Some(scope) = symbol.scope {
+            if callable || symbol.kind == SymbolKind::Class {
+                // A later binding of the same name replaces an earlier one, as in Python.
+                self.definitions_in_scope
+                    .insert((scope, symbol.name.clone()), id);
+            }
+        }
+        if callable {
+            self.definitions_by_name
+                .entry(symbol.name.clone())
+                .or_default()
+                .push(id);
+        }
         self.symbols.push(symbol);
         id
     }
@@ -118,17 +151,10 @@ impl SymbolTable {
     /// All definitions named `name` anywhere in the package: the any-callee candidate set
     /// of ADR-005 step 5.
     pub fn definitions_named(&self, name: &str) -> Vec<SymbolId> {
-        self.symbols
-            .iter()
-            .filter(|s| {
-                s.name == name
-                    && matches!(
-                        s.kind,
-                        SymbolKind::Function | SymbolKind::Method | SymbolKind::Lambda
-                    )
-            })
-            .map(|s| s.id)
-            .collect()
+        self.definitions_by_name
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

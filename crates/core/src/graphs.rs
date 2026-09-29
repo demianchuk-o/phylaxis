@@ -50,6 +50,11 @@ pub enum CallNodeKind {
     External,
     /// The `<dynamic>` node: callee unknown even by name.
     Dynamic,
+    /// `<any of N name>`: one node per distinct set of more than `FANOUT_HUB_MIN`
+    /// candidates, with an edge to each. A call resolved by name alone to many definitions
+    /// has one edge to it instead of one to every candidate, so edges grow as
+    /// sites + candidates rather than sites × candidates.
+    FanOut,
 }
 
 /// A node of the call graph: a callable definition or an external target.

@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use petgraph::graph::NodeIndex;
 use phylaxis_core::{
     Ast, AstKind, AstNodeId, CallEdge, CallGraph, CallNode, CallNodeKind, Confidence, FileId,
     QualifiedName, Span, Symbol, SymbolId, SymbolKind, SymbolTable,
@@ -256,6 +257,50 @@ pub fn build_call_graph(asts: &[Ast], table: &mut SymbolTable) -> Result<CallGra
         symbol
     });
 
+    // Fan-out nodes, one per distinct wide candidate set, in the sorted order of the sets.
+    let mut fan_outs: BTreeMap<Vec<SymbolId>, NodeIndex> = BTreeMap::new();
+    for site in &sites {
+        if let Resolution::Candidates(targets) = &site.resolution {
+            let set = candidate_set(table, targets);
+            if set.len() > FANOUT_HUB_MIN {
+                fan_outs.entry(set).or_insert(NodeIndex::end());
+            }
+        }
+    }
+    for (set, node) in fan_outs.iter_mut() {
+        let short = table
+            .get(set[0])
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let name = QualifiedName::new(format!("<any of {} {short}>", set.len()));
+        let symbol = push_synthetic(table, &name, SymbolKind::FanOut);
+        *node = graph.add_node(CallNode {
+            symbol,
+            kind: CallNodeKind::FanOut,
+            name,
+            file: None,
+        });
+        for target in set {
+            let Some(to) = graph.node_of(*target) else {
+                continue;
+            };
+            // The edge stands for "the call lands here": it is placed at the candidate's
+            // own definition, which is what an auditor reading the path wants to see.
+            let at = table.get(*target);
+            graph.graph.add_edge(
+                *node,
+                to,
+                CallEdge {
+                    file: at.and_then(|s| s.file).unwrap_or(FileId(0)),
+                    site: at.and_then(|s| s.defined_at).unwrap_or_default(),
+                    ast_node: at.and_then(|s| s.ast_node).unwrap_or(AstNodeId(0)),
+                    confidence: Confidence::Ambiguous,
+                    dynamic_dispatch: false,
+                },
+            );
+        }
+    }
+
     // Phase 3 — edges.
     for site in &sites {
         let Some(from) = graph.node_of(site.owner) else {
@@ -269,9 +314,15 @@ pub fn build_call_graph(asts: &[Ast], table: &mut SymbolTable) -> Result<CallGra
                 add_edge(&mut graph, from, target, site, Confidence::Resolved);
             }
             Resolution::Candidates(targets) => {
-                for target in targets {
-                    let target = callable_target(table, *target);
-                    add_edge(&mut graph, from, target, site, Confidence::Ambiguous);
+                let set = candidate_set(table, targets);
+                if let Some(hub) = fan_outs.get(&set) {
+                    let symbol = graph.graph[*hub].symbol;
+                    add_edge(&mut graph, from, symbol, site, Confidence::Ambiguous);
+                } else {
+                    for target in targets {
+                        let target = callable_target(table, *target);
+                        add_edge(&mut graph, from, target, site, Confidence::Ambiguous);
+                    }
                 }
                 if let Some(symbol) =
                     unknown_receiver_name(site).and_then(|n| external_nodes.get(&n))
@@ -293,6 +344,22 @@ pub fn build_call_graph(asts: &[Ast], table: &mut SymbolTable) -> Result<CallGra
     }
 
     Ok(graph)
+}
+
+/// Above this many candidates, a call resolved by name alone goes through a `FanOut` node.
+///
+/// WHY: ADR-005's any-callee fan-out gives an `obj.forward()` on an unknown receiver an edge
+/// to every definition named `forward`. In a large package that is hundreds of candidates at
+/// thousands of sites: `transformers` 5.17 had 85 million call edges. One node per distinct
+/// candidate set keeps every candidate reachable from every such site, at `Ambiguous` as
+/// before, with sites + candidates edges. A path through it is one step longer, which
+/// matters only against the 64-edge search bound. Narrow calls keep direct edges.
+pub(crate) const FANOUT_HUB_MIN: usize = 8;
+
+/// The distinct call targets of a candidate list, sorted: the identity of a fan-out.
+fn candidate_set(table: &SymbolTable, targets: &[SymbolId]) -> Vec<SymbolId> {
+    let set: BTreeSet<SymbolId> = targets.iter().map(|t| callable_target(table, *t)).collect();
+    set.into_iter().collect()
 }
 
 /// `(file, ast node) → symbol` for every definition, so a call site's owner is found by
@@ -534,6 +601,55 @@ mod tests {
         let ext = node_named(&cg, "subprocess.run");
         assert_eq!(cg.graph[ext].kind, CallNodeKind::External);
         assert!(cg.graph.edges_connecting(root, ext).next().is_some());
+    }
+
+    // Above FANOUT_HUB_MIN candidates the call goes to one FanOut node, which goes to every
+    // candidate at Ambiguous: each stays reachable from the caller in two steps, and two
+    // sites with the same candidates share the node.
+    #[test]
+    fn wide_fan_out_goes_through_one_shared_node() {
+        let n = FANOUT_HUB_MIN + 2;
+        let mut src = String::new();
+        for i in 0..n {
+            src.push_str(&format!(
+                "class C{i}:
+    def run(self):
+        pass
+"
+            ));
+        }
+        src.push_str(
+            "def go(obj):
+    obj.run()
+def again(obj):
+    obj.run()
+",
+        );
+        let (_, cg) = callgraph_from_sources(&[("pkg/a.py", &src)]);
+        let hubs: Vec<_> = cg
+            .graph
+            .node_indices()
+            .filter(|i| cg.graph[*i].kind == CallNodeKind::FanOut)
+            .collect();
+        assert_eq!(hubs.len(), 1, "one shared fan-out node");
+        let hub = hubs[0];
+        for caller in ["pkg.a.go", "pkg.a.again"] {
+            assert!(
+                cg.graph
+                    .edges_connecting(node_named(&cg, caller), hub)
+                    .next()
+                    .is_some()
+            );
+        }
+        for i in 0..n {
+            let target = node_named(&cg, &format!("pkg.a.C{i}.run"));
+            let e = cg
+                .graph
+                .edges_connecting(hub, target)
+                .next()
+                .expect("fan-out edge");
+            assert_eq!(e.weight().confidence, Confidence::Ambiguous);
+        }
     }
 
     // ADR-005 step 5: an attribute call on an unknown receiver fans out to every

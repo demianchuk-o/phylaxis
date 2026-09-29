@@ -10,6 +10,7 @@ use phylaxis_core::{
     FlowEdgeKind, FlowNode, FlowNodeKind, QualifiedName, Span, SymbolId, SymbolKind, SymbolTable,
 };
 
+use crate::callgraph::FANOUT_HUB_MIN;
 use crate::error::GraphError;
 use crate::symbols::canonicalize;
 
@@ -215,12 +216,25 @@ pub fn build_data_flow(
     // Every call site the call graph resolved, keyed the way the walk meets it.
     let mut targets_of_site: BTreeMap<(FileId, AstNodeId), Vec<(NodeIndex, Confidence)>> =
         BTreeMap::new();
+    // A site whose edge goes to a `FanOut` node is expanded back into the fan-out's
+    // candidates, so this stage sees the same targets as without the node; the fan-out's own
+    // edges are not call sites.
     for edge in calls.graph.edge_references() {
+        if calls.graph[edge.source()].kind == CallNodeKind::FanOut {
+            continue;
+        }
         let w = edge.weight();
-        targets_of_site
-            .entry((w.file, w.ast_node))
-            .or_default()
-            .push((edge.target(), w.confidence));
+        let slot = targets_of_site.entry((w.file, w.ast_node)).or_default();
+        if calls.graph[edge.target()].kind == CallNodeKind::FanOut {
+            for candidate in calls.graph.edges(edge.target()) {
+                slot.push((
+                    candidate.target(),
+                    w.confidence.min(candidate.weight().confidence),
+                ));
+            }
+        } else {
+            slot.push((edge.target(), w.confidence));
+        }
     }
 
     let mut w = Walker {
@@ -674,7 +688,11 @@ impl Walker<'_> {
             let target_node = &self.calls.graph[*target];
             match target_node.kind {
                 CallNodeKind::Definition => package_targets.push((target_node.symbol, *confidence)),
-                CallNodeKind::External | CallNodeKind::Dynamic | CallNodeKind::ModuleRoot => {
+                // A `FanOut` never reaches here: `targets_of_site` expands it.
+                CallNodeKind::External
+                | CallNodeKind::Dynamic
+                | CallNodeKind::ModuleRoot
+                | CallNodeKind::FanOut => {
                     let name = target_node.name.clone();
                     let symbol = target_node.symbol;
                     let preserving = is_taint_preserving(&name).or_else(|| {
@@ -1296,18 +1314,16 @@ impl Walker<'_> {
     }
 }
 
-/// Above this many candidate targets a call is wired through hubs.
-///
-/// WHY hubs: a call resolved by method name alone (ADR-005, the any-callee fan-out) can have
-/// hundreds of candidates, and wiring every call site to every candidate grows as
-/// sites × candidates. On `transformers` 5.17 that asked for a 20 GiB edge vector
-/// (SAFETY.md G4). One hub node per (target set, argument slot) carries the same
-/// reachability, because every actual of a slot already reached that slot's formal in every
-/// candidate, with sites + candidates edges instead. Nothing appears or disappears: each
-/// hub → formal edge keeps its candidate's own confidence, and the actual → hub edge is
-/// `Resolved`, so a path's minimum confidence is what it was. Narrow calls stay direct,
-/// where a hub would only add a step to the evidence.
-const FANOUT_HUB_MIN: usize = 8;
+// Hubs, for calls with more than `FANOUT_HUB_MIN` candidates (the call graph's `FanOut`
+// bound). WHY: a call resolved by method name alone (ADR-005, the any-callee fan-out) can have
+// hundreds of candidates, and wiring every call site to every candidate grows as
+// sites × candidates. On `transformers` 5.17 that asked for a 20 GiB edge vector
+// (SAFETY.md G4). One hub node per (target set, argument slot) carries the same
+// reachability, because every actual of a slot already reached that slot's formal in every
+// candidate, with sites + candidates edges instead. Nothing appears or disappears: each
+// hub → formal edge keeps its candidate's own confidence, and the actual → hub edge is
+// `Resolved`, so a path's minimum confidence is what it was. Narrow calls stay direct,
+// where a hub would only add a step to the evidence.
 
 /// A wide call's candidate targets, sorted, and whether it has a receiver: calls that agree
 /// on both land in the same formals, so they share hubs.

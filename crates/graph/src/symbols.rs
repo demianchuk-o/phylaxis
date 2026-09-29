@@ -203,19 +203,8 @@ pub fn canonicalize(table: &SymbolTable, file: FileId, dotted: &str) -> Qualifie
 pub fn resolve_bare_name(table: &SymbolTable, scope: SymbolId, name: &str) -> Option<SymbolId> {
     let mut current = Some(scope);
     while let Some(here) = current {
-        let found = table.symbols.iter().rev().find(|s| {
-            s.scope == Some(here)
-                && s.name == name
-                && matches!(
-                    s.kind,
-                    SymbolKind::Function
-                        | SymbolKind::Method
-                        | SymbolKind::Lambda
-                        | SymbolKind::Class
-                )
-        });
-        if let Some(sym) = found {
-            return Some(sym.id);
+        if let Some(id) = table.definitions_in_scope.get(&(here, name.to_owned())) {
+            return Some(*id);
         }
         current = table.get(here)?.scope;
     }
