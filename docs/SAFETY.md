@@ -178,11 +178,11 @@ all of them pass yet. This table is the truth as of the last run.
 
 | Guarantee | Specified | Tests written | Passing |
 |---|---|---|---|
-| G1 no execution | yes | yes | not yet — the fixture exists (T-02); the test drives `scan_one`, which is T-12 |
-| G2 no escape | yes | yes | **yes** at the unit level — `validate_entry` and the `tar_slip` archive; the end-to-end test waits on T-12 |
+| G1 no execution | yes | yes | **yes** — `e2e_safety::extraction_and_scan_never_run_setup_py` over the `setup_py_marker` fixture |
+| G2 no escape | yes | yes | **yes** — `validate_entry` and the `tar_slip` archive at the unit level, `e2e_safety::tar_slip_sdist_is_skipped_with_extraction_failed` end to end |
 | G3 network gate | yes | yes | **yes** |
-| G4 bounded resources | yes | yes | extraction **yes** (entry count, per-file and total bytes, both from the header and from the bytes read); literal folding not yet (T-08) |
-| G5 determinism | yes | yes | not yet (T-12) |
+| G4 bounded resources | yes | yes | **yes** — extraction (entry count, per-file and total bytes, both from the header and from the bytes read) and literal folding (decoder depth, expression nesting, output size) |
+| G5 determinism | yes | yes | **yes** — `e2e_scan::scan_is_byte_deterministic` |
 | G6 only source on disk | yes | yes | **yes** (T-03 + ADR-020) |
 
 Nothing in this document may be softened to make a test pass. If an implementation cannot
