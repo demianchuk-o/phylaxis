@@ -11,9 +11,11 @@ phylaxis-core.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [features]
 # OFF by default. Invariant 5 (CLAUDE.md): the network is only ever used to pull
 # packages from the official PyPI index, never in response to package contents.
 default = []
-network = ["dep:tokio", "dep:reqwest"]
+network = ["dep:tokio", "dep:reqwest", "dep:serde_json", "dep:sha2"]

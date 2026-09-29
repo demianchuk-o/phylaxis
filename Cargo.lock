@@ -1001,6 +1001,8 @@ version = "0.1.0"
 dependencies = [
  "phylaxis-core",
  "reqwest",
+ "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
 ]

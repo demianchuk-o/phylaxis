@@ -84,8 +84,23 @@ definition; and accepting it would mean betting that the HTTP client splits the 
 exactly the same byte this function does. HTTP clients have historically disagreed about
 that, and a disagreement is a request to a host nobody approved.
 
+`PackageRef::parse` closes the alphabet of both halves before any URL is built: the name goes
+through PEP 508's `[A-Za-z0-9._-]`, the version through PEP 440's `[A-Za-z0-9.+!_-]`, so no
+`/`, `?`, `#`, `%` or `@` can reach the JSON API URL. What PyPI answers is treated as network
+data like any other:
+
+- the gate runs on **every** request, the sdist URL taken from the JSON included, and on every
+  redirect (the HTTP client follows a redirect only onto an official host, at most five);
+- the file name from the JSON must be a plain `.tar.gz` sdist name with no separator, drive
+  or `..`, so the response cannot choose where the file lands;
+- the body is capped at 512 MiB while it streams, and must hash to the sha256 PyPI published
+  for it; otherwise the partial file is deleted and nothing is returned.
+
 *Proven by:* `fetch::tests::official_index_gate`, which includes the userinfo-confusion cases
-in both directions, and `network_is_unreachable_without_the_feature`.
+in both directions, `package_ref_rejects_urls_and_paths`,
+`package_ref_version_alphabet_is_closed`, `sdist_file_name_cannot_carry_a_path` (with the
+feature), and `network_is_unreachable_without_the_feature`. One live download, opt-in and
+outside the suite, exercises the digest check against PyPI.
 
 ### G4 — Resource use is bounded, and failure is closed
 
@@ -165,7 +180,7 @@ all of them pass yet. This table is the truth as of the last run.
 |---|---|---|---|
 | G1 no execution | yes | yes | not yet — the fixture exists (T-02); the test drives `scan_one`, which is T-12 |
 | G2 no escape | yes | yes | **yes** at the unit level — `validate_entry` and the `tar_slip` archive; the end-to-end test waits on T-12 |
-| G3 network gate | yes | yes | **yes**, except `PackageRef::parse` (T-14) |
+| G3 network gate | yes | yes | **yes** |
 | G4 bounded resources | yes | yes | extraction **yes** (entry count, per-file and total bytes, both from the header and from the bytes read); literal folding not yet (T-08) |
 | G5 determinism | yes | yes | not yet (T-12) |
 | G6 only source on disk | yes | yes | **yes** (T-03 + ADR-020) |
