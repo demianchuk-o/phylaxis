@@ -16,3 +16,4 @@ crate-type = ["cdylib", "rlib"]
 phylaxis-core.workspace = true
 phylaxis-cli.workspace = true
 pyo3.workspace = true
+serde_json.workspace = true

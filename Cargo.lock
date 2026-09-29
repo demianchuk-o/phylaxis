@@ -1039,6 +1039,7 @@ dependencies = [
  "phylaxis-cli",
  "phylaxis-core",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]
