@@ -16,6 +16,9 @@ after the first run require a new ADR that records what was measured before and 
 
 - The unit is **one distribution file**, identified by sha256. A project with several
   versions in the malicious set contributes each distinct sdist once.
+- **Amended by ADR-023 (2026-09-30), before any run:** the Datadog samples are published
+  unpacked, so a malicious unit is one unpacked sample scanned as a directory and identified
+  by a content hash; the dataset's own GuardDog selection bias is reported with E2.
 - **Malicious label:** membership in the Datadog `malicious-software-packages-dataset` PyPI
   set or the Backstabber
   (Ohm et al., 2020) PyPI subset. Wheels-only entries are counted in the *coverage* table and

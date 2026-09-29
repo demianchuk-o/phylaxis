@@ -889,6 +889,62 @@ coincidence.
 
 ---
 
+## ADR-023 — The Datadog samples are unpacked packages, not sdist files
+
+**Date:** 2026-09-30. **Status:** accepted. Amends EVALUATION.md §2 before any run.
+
+### Context
+
+EVALUATION.md §2 made the unit of evaluation "one distribution file, identified by sha256".
+The Datadog `malicious-software-packages-dataset` does not distribute files in that form.
+Each PyPI sample is an encrypted zip (password `infected`) holding the package **already
+unpacked**: most are the contents of an sdist (`PKG-INFO`, `setup.py` or `pyproject.toml`),
+some are the contents of a wheel (`*.dist-info/`). The original archives cannot be fetched
+again, because PyPI removes malicious releases. The Backstabber subset, the only other
+malicious source, has not been made available (no reply to the access request).
+
+The dataset's own README also says it "may suffer from selection bias, as it was mostly
+identified by a single ruleset (GuardDog)". GuardDog is one of the two baselines (§5).
+
+### Alternatives considered
+
+1. **Re-pack each sample into a `.tar.gz` and scan the archive.** Rejected: the archive would
+   be ours, not the attacker's, so it would exercise extraction on inputs nobody published,
+   and its hash would identify nothing real.
+2. **Wait for Backstabber.** Rejected: access is not in our control, and Datadog alone
+   already defines the malicious label in §2 ("Datadog … or Backstabber").
+3. **Scan the unpacked sample as a directory.** Chosen.
+
+### Choice
+
+- The unit is **one sample**: for Datadog, the package root inside the zip (the shallowest
+  directory with `setup.py`, `pyproject.toml` or `setup.cfg`), scanned with the directory
+  path of `scan_one`. For the benign set it stays the sdist file, scanned as an archive.
+  Both reach the same parse, graph and rule stages; only the benign side exercises
+  extraction, whose safety is proven separately (SAFETY.md G2, fixtures).
+- **Identity is a content hash**, not the zip's hash: sha256 over the sorted (relative
+  path, sha256 of bytes) pairs under the package root. Datadog's zips carry their own
+  timestamps, so identical packages give different zips; deduplication is on content.
+- **Labels** follow the dataset's manifest: a `null` entry is malicious intent (every
+  version counts), a list names the compromised versions of an otherwise benign project.
+  A sample outside the manifest, or a version not in its list, is excluded with that
+  reason.
+- **Unpacked wheels are excluded** (invariant 2) and counted in the coverage table, as §2
+  already required for wheel-only entries.
+- **Samples are unpacked one at a time** into one work folder and deleted after their
+  scan. After each scan the harness re-reads every unpacked file; a file an antivirus has
+  quarantined or locked makes the row an error, not a clean verdict.
+
+### Consequences
+
+- The E2 comparison with GuardDog is biased in GuardDog's favour: its rules found most of
+  the malicious set. This is stated wherever E2 numbers appear; it is a limitation of the
+  only available labelled set, not something the protocol can correct.
+- Split, seed, operating points and constants are unchanged. `eval/manifest.json` records
+  the dataset commit and the benign snapshot date.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
