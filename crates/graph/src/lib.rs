@@ -16,7 +16,7 @@ pub mod reach;
 pub mod symbols;
 
 pub use error::GraphError;
-pub use reach::{ReachLimits, control_paths, data_paths, find_sinks, find_sources};
+pub use reach::{ReachLimits, control_paths, data_paths, data_paths_to, find_sinks, find_sources};
 
 use phylaxis_core::{Ast, PackageGraph, ProjectMeta};
 

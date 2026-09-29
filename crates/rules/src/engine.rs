@@ -9,7 +9,7 @@ use phylaxis_core::{
     TaintSink, TaintSinkKind, TaintSource, TaintSourceKind, Verdict,
 };
 use phylaxis_graph::reach::{
-    ReachLimits, SourcePattern, control_paths, data_paths, find_sinks, find_sources,
+    ReachLimits, SourcePattern, control_paths, data_paths_to, find_sinks, find_sources,
 };
 
 use crate::catalogue::{RULES, SINK_PATTERNS, SOURCE_PATTERNS};
@@ -61,20 +61,15 @@ pub fn evaluate_rule(
         AnalysisMode::Reachability { .. } => match rule.reachability {
             ReachabilityKind::Data => {
                 let sources = sources(pg, rule.sources);
-                let mut out = Vec::new();
-                // One `data_paths` call per sink keeps each path paired with the sink it
-                // ends at, which is what the phase is read from.
-                for sink in &targets {
-                    for path in data_paths(
-                        pg,
-                        &sources,
-                        std::slice::from_ref(sink),
-                        &ReachLimits::default(),
-                    ) {
-                        out.push((path, sink));
-                    }
-                }
-                // Canonical path order: by source location, then sink location.
+                // One search per source serves every sink; the index pairs each path with
+                // the sink it ends at, which is what the phase is read from.
+                let mut out: Vec<(ReachabilityPath, &TaintSink, usize)> =
+                    data_paths_to(pg, &sources, &targets, &ReachLimits::default())
+                        .into_iter()
+                        .map(|(path, i)| (path, &targets[i], i))
+                        .collect();
+                // Canonical path order: by source location, then sink location, then the
+                // sink's position in `targets` (the order a per-sink search produced).
                 out.sort_by(|a, b| {
                     let key = |p: &ReachabilityPath| {
                         (
@@ -82,8 +77,10 @@ pub fn evaluate_rule(
                             p.steps.last().map(|s| s.location.clone()),
                         )
                     };
-                    key(&a.0).cmp(&key(&b.0))
+                    (key(&a.0), a.2).cmp(&(key(&b.0), b.2))
                 });
+                let out: Vec<(ReachabilityPath, &TaintSink)> =
+                    out.into_iter().map(|(p, s, _)| (p, s)).collect();
                 out
             }
             ReachabilityKind::Control => {

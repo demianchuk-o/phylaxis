@@ -11,7 +11,7 @@
 //! (file, then span), and for each (source, sink) pair the *shortest* path is chosen
 //! (BFS), ties broken by node index. Two scans of the same bytes yield identical paths.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use petgraph::Direction;
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -543,44 +543,100 @@ pub fn data_paths(
     sinks: &[TaintSink],
     limits: &ReachLimits,
 ) -> Vec<ReachabilityPath> {
-    // EXPLAIN(opus): breadth-first search from each source, keeping for every reached node
-    // the edge it was first reached by (`parent`). Walking `parent` back from a sink gives
-    // the path. BFS reaches each node first along a path with the fewest edges, so that
-    // path is the shortest one, and ties are broken by visiting out-edges in target-index
-    // order — which makes the choice a function of the graph alone (ADR-004).
+    data_paths_to(pg, sources, sinks, limits)
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// [`data_paths`], with each path paired with the index in `sinks` of the sink it ends at.
+/// The rule engine needs that pairing to read the sink's phase; asking for it here lets it
+/// run one search per source for all its sinks, instead of one per (source, sink).
+pub fn data_paths_to(
+    pg: &PackageGraph,
+    sources: &[TaintSource],
+    sinks: &[TaintSink],
+    limits: &ReachLimits,
+) -> Vec<(ReachabilityPath, usize)> {
+    // Breadth-first search from each source, keeping for every reached node the edge it was
+    // first reached by (`parent`). Walking `parent` back from a sink gives the path. BFS
+    // reaches each node first along a path with the fewest edges, so that path is the
+    // shortest one, and ties are broken by visiting out-edges in target-index order — which
+    // makes the choice a function of the graph alone (ADR-004).
     //
     // WHY one path and not all of them: the number of simple paths between two nodes grows
     // exponentially with the graph (a chain of n diamonds has 2^n), and the graph is
     // written by the attacker. The rule needs to know that *a* path exists, and the auditor
     // needs one readable path to confirm or refute it; the shortest is the most readable.
-    // One BFS per source serves every sink, so the cost is O(sources × edges).
+    //
+    // WHY the search is pruned to `live` nodes, those from which some sink is reachable:
+    // without it every source explores the whole graph, and a large package has thousands
+    // of sources and millions of nodes. The pruning changes no path. Every node on a path
+    // to a sink is live, and a dead node has no edge into a live one (it would be live
+    // itself), so live nodes are discovered by live nodes only: in the same order, at the
+    // same depth, from the same parent as in the unpruned search.
     let d = &pg.dfg.graph;
     let mut out = Vec::new();
-    if limits.max_paths_per_pair == 0 {
+    if limits.max_paths_per_pair == 0 || sinks.is_empty() {
         return out;
     }
+    let live = can_reach(d.node_count(), sinks.iter().map(|s| s.node), |n| {
+        d.edges_directed(n, Direction::Incoming)
+            .map(|e| e.source())
+            .collect()
+    });
     for source in sources {
-        if source.kind == TaintSourceKind::PhaseRoot || d.node_weight(source.node).is_none() {
+        if source.kind == TaintSourceKind::PhaseRoot
+            || d.node_weight(source.node).is_none()
+            || !live[source.node.index()]
+        {
             continue;
         }
-        let parent = bfs(source.node, limits.max_depth, |n| {
+        let parent = bfs(d.node_count(), source.node, limits.max_depth, |n| {
             let mut next: Vec<(NodeIndex, EdgeIndex)> = d
                 .edges_directed(n, Direction::Outgoing)
+                .filter(|e| live[e.target().index()])
                 .map(|e| (e.target(), e.id()))
                 .collect();
             next.sort();
             next
         });
-        for sink in sinks {
+        for (i, sink) in sinks.iter().enumerate() {
             let Some(edges) = walk_back(&parent, source.node, sink.node, |e| {
                 d.edge_endpoints(e).map(|(from, _)| from)
             }) else {
                 continue;
             };
-            out.push(data_path(pg, source, sink, &edges));
+            out.push((data_path(pg, source, sink, &edges), i));
         }
     }
     out
+}
+
+/// Every node from which one of `goals` is reachable, as a flag per node index: a
+/// traversal from the goals along `prev` (the reversed edges).
+fn can_reach(
+    nodes: usize,
+    goals: impl Iterator<Item = NodeIndex>,
+    prev: impl Fn(NodeIndex) -> Vec<NodeIndex>,
+) -> Vec<bool> {
+    let mut live = vec![false; nodes];
+    let mut stack = Vec::new();
+    for g in goals {
+        if g.index() < nodes && !live[g.index()] {
+            live[g.index()] = true;
+            stack.push(g);
+        }
+    }
+    while let Some(n) = stack.pop() {
+        for p in prev(n) {
+            if !live[p.index()] {
+                live[p.index()] = true;
+                stack.push(p);
+            }
+        }
+    }
+    live
 }
 
 /// Control reachability. BFS in the call graph from `root.symbol`'s node to each sink's
@@ -600,7 +656,7 @@ pub fn control_paths(
     if limits.max_paths_per_pair == 0 {
         return out;
     }
-    let parent = bfs(start, limits.max_depth, |n| {
+    let parent = bfs(cg.node_count(), start, limits.max_depth, |n| {
         let mut next: Vec<(NodeIndex, EdgeIndex)> = cg
             .edges_directed(n, Direction::Outgoing)
             .map(|e| (e.target(), e.id()))
@@ -654,23 +710,30 @@ pub fn control_paths(
     out
 }
 
-/// Breadth-first search from `start`, at most `max_depth` edges deep. Returns, for every
-/// node reached other than `start`, the edge it was first reached by.
+/// Breadth-first search from `start`, at most `max_depth` edges deep. Returns, per node
+/// index, the edge that node was first reached by (`None` for `start` and for nodes not
+/// reached). A flat vector rather than a map: a search visits up to millions of nodes.
 fn bfs(
+    nodes: usize,
     start: NodeIndex,
     max_depth: usize,
     mut next: impl FnMut(NodeIndex) -> Vec<(NodeIndex, EdgeIndex)>,
-) -> BTreeMap<NodeIndex, EdgeIndex> {
-    let mut parent = BTreeMap::new();
-    let mut seen = BTreeSet::from([start]);
+) -> Vec<Option<EdgeIndex>> {
+    let mut parent = vec![None; nodes];
+    let mut seen = vec![false; nodes];
+    if start.index() >= nodes {
+        return parent;
+    }
+    seen[start.index()] = true;
     let mut frontier = VecDeque::from([(start, 0usize)]);
     while let Some((node, depth)) = frontier.pop_front() {
         if depth == max_depth {
             continue;
         }
         for (to, edge) in next(node) {
-            if seen.insert(to) {
-                parent.insert(to, edge);
+            if !seen[to.index()] {
+                seen[to.index()] = true;
+                parent[to.index()] = Some(edge);
                 frontier.push_back((to, depth + 1));
             }
         }
@@ -681,7 +744,7 @@ fn bfs(
 /// The edges from `start` to `goal`, in order, if the search reached `goal`. A `goal`
 /// equal to `start` is a path of no edges.
 fn walk_back(
-    parent: &BTreeMap<NodeIndex, EdgeIndex>,
+    parent: &[Option<EdgeIndex>],
     start: NodeIndex,
     goal: NodeIndex,
     source_of: impl Fn(EdgeIndex) -> Option<NodeIndex>,
@@ -689,7 +752,7 @@ fn walk_back(
     let mut edges = Vec::new();
     let mut at = goal;
     while at != start {
-        let e = *parent.get(&at)?;
+        let e = (*parent.get(at.index())?)?;
         edges.push(e);
         at = source_of(e)?;
     }
