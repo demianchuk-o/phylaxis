@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CoreError;
 use crate::graphs::Confidence;
-use crate::path::{Location, ReachabilityPath};
+use crate::path::{Location, ReachabilityKind, ReachabilityPath};
 use crate::rule::RuleId;
 use crate::taxonomy::{AttackTechnique, ExecutionPhase};
 
@@ -40,6 +40,10 @@ pub const MALICIOUS_THRESHOLD: f64 = 0.70;
 pub const OBFUSCATION_BONUS: f64 = 1.15;
 /// ADR-010: per-package bonus for each distinct technique beyond the first.
 pub const TECHNIQUE_BONUS: f64 = 0.05;
+/// ADR-022: the highest package risk reachable without a data-flow finding. One technique
+/// bonus below the Malicious threshold, so the cap is visible in a report as a round number
+/// rather than hidden at 0.699.
+pub const CONTROL_ONLY_CEILING: f64 = MALICIOUS_THRESHOLD - TECHNIQUE_BONUS;
 
 /// A deterministic score in `[0, 1]`.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -69,7 +73,13 @@ impl RiskScore {
     }
 
     /// The per-package aggregate of ADR-010:
-    /// `min(1, max_finding_score + 0.05 × (distinct_techniques − 1))`.
+    /// `min(1, max_finding_score + 0.05 × (distinct_techniques − 1))`,
+    /// then capped at `CONTROL_ONLY_CEILING` when no finding is a data path (ADR-022).
+    ///
+    /// WHY the cap: a control finding shows that a dangerous capability runs in a phase,
+    /// e.g. a download during install. What the download *is* cannot be known statically;
+    /// whether its bytes reach a sink can, and that is a data finding. Without one the
+    /// package is worth an auditor's look (Suspicious), not a conclusion (Malicious).
     pub fn aggregate(findings: &[Finding]) -> Self {
         let Some(max) = findings
             .iter()
@@ -82,7 +92,15 @@ impl RiskScore {
         techniques.sort();
         techniques.dedup();
         let extra = techniques.len().saturating_sub(1) as f64;
-        Self::new(max + TECHNIQUE_BONUS * extra)
+        let risk = max + TECHNIQUE_BONUS * extra;
+        let has_data_path = findings
+            .iter()
+            .any(|f| f.evidence.path.kind == ReachabilityKind::Data);
+        if has_data_path {
+            Self::new(risk)
+        } else {
+            Self::new(risk.min(CONTROL_ONLY_CEILING))
+        }
     }
 }
 
@@ -332,6 +350,31 @@ mod tests {
         b.technique.objective = Objective::Dropper;
         assert!((RiskScore::aggregate(&[a, b]).value() - 0.55).abs() < 1e-9);
         assert_eq!(RiskScore::aggregate(&[]).value(), 0.0);
+    }
+
+    // ADR-022: control findings alone stop below Malicious, however strong or many; one
+    // data finding lifts the cap. The fixture this answers is
+    // `benign/setup_py_download_data`: High × install × resolved = 0.80 on INS-001 alone.
+    #[test]
+    fn control_only_packages_stop_below_malicious() {
+        let data = finding(
+            vec![step(PathStepKind::Source), step(PathStepKind::Sink)],
+            ExecutionPhase::Install,
+            Confidence::Resolved,
+            false,
+        )
+        .unwrap(); // 1.0
+        let mut control = data.clone();
+        control.evidence.path.kind = ReachabilityKind::Control;
+        let mut control2 = control.clone();
+        control2.technique.objective = Objective::Dropper;
+
+        let alone = RiskScore::aggregate(&[control.clone(), control2]);
+        assert!((alone.value() - CONTROL_ONLY_CEILING).abs() < 1e-9);
+        assert_eq!(Verdict::from(alone), Verdict::Suspicious);
+
+        let with_data = RiskScore::aggregate(&[control, data]);
+        assert_eq!(Verdict::from(with_data), Verdict::Malicious);
     }
 
     // Verdict thresholds are exactly the documented constants.

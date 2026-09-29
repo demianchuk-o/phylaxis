@@ -115,6 +115,9 @@ const PRESERVING_METHODS: &[&str] = &[
     "read_text",
     "read_bytes",
     "getvalue",
+    // A descriptor is the object under another name: `os.dup2(s.fileno(), 0)` duplicates
+    // the socket itself.
+    "fileno",
     "get",
     "pop",
     "items",
@@ -124,6 +127,31 @@ const PRESERVING_METHODS: &[&str] = &[
 
 /// Of the methods above, the ones that re-encode their input (ADR-006).
 const OBFUSCATING_METHODS: &[&str] = &["encode", "decode"];
+
+/// Methods that put their arguments *into* the object they are called on (ADR-006,
+/// stateful objects): `fh.write(data)` stores `data` in the file, `s.connect(addr)` makes
+/// the socket a connection to `addr`. The call is read as a weak assignment
+/// `obj = obj ∪ args`, the same way `obj.attr = v` already taints `obj`.
+///
+/// WHY a closed list and not every method: tainting the receiver of any call with a tainted
+/// argument would make `log.info(secret)` taint the logger and everything later read
+/// through it. These are the methods whose whole purpose is to change what the object holds
+/// or where it points. `bind` is left out on purpose: binding a local address is not the
+/// socket receiving data.
+const RECEIVER_TAINTING_METHODS: &[&str] = &[
+    "write",
+    "writelines",
+    "send",
+    "sendall",
+    "sendto",
+    "connect",
+    "connect_ex",
+];
+
+/// Calls whose result is a handle on the path in their first argument. Data written into
+/// such a handle lands in that path, so it taints the path's variable too:
+/// `with open(target, "wb") as fh: fh.write(payload)` makes `target` carry `payload`.
+const OPENERS: &[&str] = &["open", "io.open"];
 
 /// How deep the walk follows nested syntax before it stops. WHY a bound: the parser keeps
 /// every node of a hostile file, and this walk recurses, so ten thousand nested brackets
@@ -206,6 +234,8 @@ pub fn build_data_flow(
         returns: BTreeMap::new(),
         reads: Vec::new(),
         package_calls: Vec::new(),
+        opened_from: BTreeMap::new(),
+        receiver_writes: Vec::new(),
     };
 
     for ast in asts {
@@ -220,6 +250,8 @@ pub fn build_data_flow(
         w.visit(ast, root.id, module, 0);
     }
 
+    // Receiver writes add definitions, so they must be in place before reads are linked.
+    w.resolve_receiver_writes();
     w.resolve_reads();
     w.resolve_package_calls();
     Ok(w.dfg)
@@ -243,6 +275,14 @@ struct PendingCall {
     targets: Vec<(SymbolId, Confidence)>,
 }
 
+/// `obj.write(x)`: a definition of `obj` fed from the arguments, filed under the scope
+/// that defines `obj` once every file has been walked.
+struct PendingReceiverWrite {
+    owner: SymbolId,
+    name: String,
+    def: NodeIndex,
+}
+
 struct Walker<'a> {
     table: &'a SymbolTable,
     calls: &'a CallGraph,
@@ -257,6 +297,9 @@ struct Walker<'a> {
     returns: BTreeMap<SymbolId, Vec<NodeIndex>>,
     reads: Vec<PendingRead>,
     package_calls: Vec<PendingCall>,
+    /// `(scope, handle) → path variables`: `fh` was bound from `open(target)` in `scope`.
+    opened_from: BTreeMap<(SymbolId, String), Vec<String>>,
+    receiver_writes: Vec<PendingReceiverWrite>,
 }
 
 impl Walker<'_> {
@@ -376,6 +419,11 @@ impl Walker<'_> {
                         .flat_map(|c| self.eval(ast, c, owner, depth + 1))
                         .collect();
                     self.bind_target(ast, alias, owner, &values, depth + 1);
+                    for value in node.children.clone() {
+                        if value != alias {
+                            self.record_opened(ast, alias, value, owner);
+                        }
+                    }
                     return;
                 }
                 for child in node.children.clone() {
@@ -453,6 +501,9 @@ impl Walker<'_> {
                         values.extend(self.eval(ast, left, owner, depth + 1));
                     }
                     self.bind_target(ast, left, owner, &values, depth + 1);
+                    if let Some(right) = ast.child_by_field(id, "right") {
+                        self.record_opened(ast, left, right, owner);
+                    }
                 }
                 values
             }
@@ -585,7 +636,7 @@ impl Walker<'_> {
             FlowNodeKind::CallResult,
             owner,
             single_symbol,
-            label,
+            label.clone(),
         );
 
         let all_actuals: Vec<(Span, NodeIndex)> = receiver
@@ -658,6 +709,16 @@ impl Walker<'_> {
             }
         }
 
+        // A call into a package method is followed through its body (`self` is bound
+        // below); only an external one is summarised as a receiver write.
+        if package_targets.is_empty()
+            && method
+                .as_deref()
+                .is_some_and(|m| RECEIVER_TAINTING_METHODS.contains(&m))
+        {
+            self.receiver_write(ast, callee, owner, &label, &all_actuals[receiver.len()..]);
+        }
+
         if !package_targets.is_empty() {
             self.package_calls.push(PendingCall {
                 result,
@@ -669,6 +730,142 @@ impl Walker<'_> {
             });
         }
         vec![result]
+    }
+
+    /// `obj.write(args)` on a plain variable `obj`: a new definition of `obj` fed from the
+    /// arguments. Filed as pending, because the scope that owns `obj` and the `open` it came
+    /// from are only known for certain once the whole package has been walked.
+    fn receiver_write(
+        &mut self,
+        ast: &Ast,
+        callee: Option<AstNodeId>,
+        owner: SymbolId,
+        label: &str,
+        arguments: &[(Span, NodeIndex)],
+    ) {
+        let Some(object) = callee.and_then(|c| ast.child_by_field(c, "object")) else {
+            return;
+        };
+        if ast.get(object).map(|n| n.kind) != Some(AstKind::Identifier) {
+            return;
+        }
+        let name = ast.text_of(object).unwrap_or_default().to_owned();
+        if self.is_imported(ast.file, &name) {
+            return;
+        }
+        let def = self.node(
+            ast,
+            object,
+            FlowNodeKind::Definition,
+            owner,
+            None,
+            name.clone(),
+        );
+        for (s, a) in arguments {
+            self.edge(
+                *a,
+                def,
+                FlowEdgeKind::Transform {
+                    callee: QualifiedName::new(label),
+                    obfuscating: false,
+                },
+                *s,
+                Confidence::Resolved,
+            );
+        }
+        self.receiver_writes
+            .push(PendingReceiverWrite { owner, name, def });
+    }
+
+    /// Remembers that `target` was bound from `open(path_var, …)`, when both are plain names.
+    fn record_opened(&mut self, ast: &Ast, target: AstNodeId, value: AstNodeId, owner: SymbolId) {
+        // The grammar wraps a `with … as fh` target in a node of its own around the name.
+        let target = match ast.get(target) {
+            Some(n) if n.kind != AstKind::Identifier && n.children.len() == 1 => n.children[0],
+            _ => target,
+        };
+        if ast.get(target).map(|n| n.kind) != Some(AstKind::Identifier)
+            || ast.get(value).map(|n| n.kind) != Some(AstKind::Call)
+        {
+            return;
+        }
+        let Some(function) = ast.child_by_field(value, "function") else {
+            return;
+        };
+        let callee = canonicalize(
+            self.table,
+            ast.file,
+            ast.text_of(function).unwrap_or_default(),
+        );
+        if !OPENERS.contains(&callee.as_str()) {
+            return;
+        }
+        let first = ast
+            .child_by_field(value, "arguments")
+            .and_then(|a| ast.get(a))
+            .and_then(|a| a.children.first().copied());
+        let Some(first) =
+            first.filter(|f| ast.get(*f).map(|n| n.kind) == Some(AstKind::Identifier))
+        else {
+            return;
+        };
+        let handle = ast.text_of(target).unwrap_or_default().to_owned();
+        let path = ast.text_of(first).unwrap_or_default().to_owned();
+        self.opened_from
+            .entry((owner, handle))
+            .or_default()
+            .push(path);
+    }
+
+    /// The nearest scope, from `owner` outwards, that defines `name`; `owner` if none does.
+    fn defining_scope(&self, owner: SymbolId, name: &str) -> SymbolId {
+        let mut scope = Some(owner);
+        while let Some(here) = scope {
+            if self.defs.contains_key(&(here, name.to_owned())) {
+                return here;
+            }
+            scope = self.table.get(here).and_then(|s| s.scope);
+        }
+        owner
+    }
+
+    /// Files every receiver write as a definition of its variable, and — when that variable
+    /// is a handle bound from `open(path)` — as a definition of `path` as well.
+    fn resolve_receiver_writes(&mut self) {
+        let pending = std::mem::take(&mut self.receiver_writes);
+        for write in pending {
+            let scope = self.defining_scope(write.owner, &write.name);
+            let paths = self
+                .opened_from
+                .get(&(scope, write.name.clone()))
+                .cloned()
+                .unwrap_or_default();
+            self.defs
+                .entry((scope, write.name))
+                .or_default()
+                .push(write.def);
+            for path in paths {
+                let path_scope = self.defining_scope(scope, &path);
+                let mut node = self.dfg.graph[write.def].clone();
+                node.label = path.clone();
+                let span = node.span;
+                let path_def = self.dfg.graph.add_node(node);
+                self.edge(
+                    write.def,
+                    path_def,
+                    FlowEdgeKind::Transform {
+                        callee: QualifiedName::new("open"),
+                        obfuscating: false,
+                    },
+                    span,
+                    Confidence::Resolved,
+                );
+                self.defs
+                    .entry((path_scope, path))
+                    .or_default()
+                    .push(path_def);
+            }
+        }
     }
 
     /// Positional, keyword and splatted actuals of a call, each with its span.
@@ -1075,6 +1272,67 @@ mod tests {
             d.edge_indices().any(|e| d[e].kind == FlowEdgeKind::Return),
             "Return edge"
         );
+    }
+
+    fn reaches(
+        d: &petgraph::Graph<FlowNode, FlowEdge>,
+        from: &str,
+        to: (FlowNodeKind, &str),
+    ) -> bool {
+        let starts: Vec<_> = d.node_indices().filter(|i| d[*i].label == from).collect();
+        let ends: Vec<_> = d
+            .node_indices()
+            .filter(|i| d[*i].kind == to.0 && d[*i].label == to.1)
+            .collect();
+        assert!(!starts.is_empty() && !ends.is_empty(), "nodes missing");
+        starts.iter().any(|s| {
+            ends.iter()
+                .any(|e| petgraph::algo::has_path_connecting(d, *s, *e, None))
+        })
+    }
+
+    // Stateful objects (ADR-006): bytes written through a handle land in the path it was
+    // opened on, in both binding forms, and whichever order the statements come in.
+    #[test]
+    fn write_through_a_handle_taints_the_opened_path() {
+        for src in [
+            "import os\ns = os.environ['S']\nt = 'x'\nwith open(t, 'w') as fh:\n    fh.write(s)\nr = t\n",
+            "import os\nt = 'x'\nfh = open(t, 'w')\nfh.write(os.environ['S'])\nr = t\n",
+        ] {
+            let g = graph_from_sources(&[("pkg/a.py", src)]);
+            assert!(
+                reaches(&g.dfg.graph, "os.environ", (FlowNodeKind::Definition, "r")),
+                "{src}"
+            );
+        }
+    }
+
+    // `s.connect(addr)` makes the socket carry the address, and `fileno` keeps it.
+    #[test]
+    fn connect_taints_the_socket_and_fileno_keeps_it() {
+        let g = graph_from_sources(&[(
+            "pkg/a.py",
+            "import socket\ns = socket.socket()\ns.connect(('203.0.113.9', 1))\nfd = s.fileno()\n",
+        )]);
+        assert!(reaches(
+            &g.dfg.graph,
+            "203.0.113.9",
+            (FlowNodeKind::Definition, "fd")
+        ));
+    }
+
+    // The list is closed: a method not on it does not taint its receiver.
+    #[test]
+    fn other_methods_do_not_taint_their_receiver() {
+        let g = graph_from_sources(&[(
+            "pkg/a.py",
+            "import logging, os\nlog = logging.getLogger()\nlog.info(os.environ['S'])\nx = log\n",
+        )]);
+        assert!(!reaches(
+            &g.dfg.graph,
+            "os.environ",
+            (FlowNodeKind::Definition, "x")
+        ));
     }
 
     // `len(secret)` drops taint: len is not on the list, so no edge into its result.

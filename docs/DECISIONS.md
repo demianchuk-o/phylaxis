@@ -262,6 +262,28 @@ This over-approximates in ADR-007's direction: a file opened by a tainted *name*
 its content, so `open(os.environ["CONFIG"]).read()` sent to a server is reported as
 environment exfiltration.
 
+**Amended 2026-09-30, after the first end-to-end run: stateful objects.** Taint also flows
+*into* an object through a closed list of methods whose purpose is to change what the object
+holds or where it points: `write`, `writelines`, `send`, `sendall`, `sendto`, `connect`,
+`connect_ex`. `obj.m(args)` is read as a weak assignment `obj = obj ∪ args`, the same way
+`obj.attr = v` already tainted `obj`. When `obj` was bound from `open(path)` (`fh = open(p)`
+or `with open(p) as fh`, both plain names), the written data also defines `path`, because
+that is where the bytes land. `fileno` joins the preserving methods: a descriptor is the
+object under another name.
+
+Without this, `with open(target, "wb") as fh: fh.write(response.read())` followed by
+`subprocess.run([target])` had no path from the response to the execution, and
+`s.connect(addr)` followed by `os.dup2(s.fileno(), 0)` had no path from the address to the
+`dup2`. Both are the core shape of their technique.
+
+`WHY a list and not every method:` tainting the receiver of any call with a tainted argument
+would make `log.info(secret)` taint the logger and everything later read through it.
+`bind` is left out: binding a local address is not the socket receiving data. Like every
+read in this graph, the new definitions are flow-insensitive within their scope: a write
+taints reads of the variable before it as well as after. What is not covered: a handle
+opened on an expression (`open(os.path.join(d, n))`), `Path(p).write_bytes(x)`, and an
+object passed to a function that writes into it.
+
 ---
 
 ## ADR-007 — Over-approximation policy
@@ -431,6 +453,9 @@ Per package: `risk = min(1, max_finding_score + 0.05 × (distinct_techniques −
 Verdict: `risk ≥ 0.70 → Malicious`, `0.40 ≤ risk < 0.70 → Suspicious`, `< 0.40 → Clean`.
 "Flagged" in the metrics means `risk ≥ 0.40` at the primary operating point and `≥ 0.70` at
 the strict one.
+
+**Amended by ADR-022 (2026-09-30):** when no finding is a data path, `risk` is capped at
+0.65 before the verdict, so control findings alone stop at Suspicious.
 
 `WHY fixed now:` the constants must exist before the first evaluation run so that they cannot
 be tuned on the test set. Any change is a new ADR with the development-set measurement that
@@ -796,6 +821,62 @@ empty — it is a fact about the file list, not about that file — and the call
 
 ---
 
+## ADR-022 — Malicious needs a data path; control findings alone stop at Suspicious
+
+**Date:** 2026-09-30. **Status:** accepted. Amends ADR-010.
+
+### Context
+
+The first end-to-end run scored `benign/setup_py_download_data` Malicious. The package
+downloads a data file during install and does nothing dangerous with it. PHX-INS-001 alone
+scores High × install × resolved = 0.80, above the 0.70 threshold, and nothing in ADR-010
+stopped a single control finding from deciding the verdict. RULES.md already claimed a
+control rule "reaches Malicious only in combination with a data rule"; the formula did not
+implement that sentence.
+
+The question is not where the threshold sits but what a control finding is evidence *of*.
+A control path shows that a dangerous capability runs in a phase: this package reaches the
+network during install. What the download contains cannot be known statically. What can be
+known is whether the fetched bytes reach a sink (executed, written somewhere that runs), and
+that is a data path, which is what the data rules (PHX-DRP-*) look for.
+
+### Alternatives considered
+
+1. **Move the threshold or change `≥` to `>`.** Rejected: 0.80 is above 0.70, so `>` would
+   not have helped; and any number chosen to pass one fixture is tuning, not reasoning.
+2. **Demote PHX-INS-001 to Medium.** Rejected: it fixes one rule and leaves the property
+   unstated. Any other control rule at High or Critical would reach Malicious alone.
+3. **Accept it: install-time egress alone is Malicious.** Rejected: it contradicts RULES.md
+   and marks a documented, legitimate pattern of older packages as an attack.
+4. **Cap the package risk when no finding is a data path.** Chosen.
+
+### Choice
+
+After the ADR-010 aggregate, if none of a package's findings has a `Data` path, its risk is
+capped at `CONTROL_ONLY_CEILING = 0.70 − 0.05 = 0.65`, the Malicious threshold less one
+technique bonus. A control finding is a reason to look (Suspicious), a data path is a
+conclusion (Malicious). The cap applies in every analysis mode: the co-occurrence
+configurations of the ablation carry the rule's reachability kind on their evidence too.
+
+`WHY 0.65 and not 0.699:` the cap should show in a report as the round number it is, so
+that a reader who sees 0.65 on several packages recognises the ceiling instead of a
+coincidence.
+
+### Consequences
+
+- The primary operating point (risk ≥ 0.40) is unaffected: every control-only package that
+  was flagged is still flagged.
+- The strict operating point (risk ≥ 0.70) now needs a data path. A dropper whose data flow
+  the graph misses falls from Malicious to Suspicious. That is a measured cost, visible in
+  the τ = 0.70 recall, and it is the honest one: the method is only certain when it can show
+  the path.
+- Control-only packages tie at 0.65 above the ceiling, so ranking among them is lost at the
+  top of the Suspicious band. Ranking by the uncapped score is still possible from the
+  findings in the report.
+- No evaluation had run when this was decided, so it is not tuned on the test set (ADR-011).
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
@@ -886,8 +967,10 @@ was applied meanwhile.
      `SuspiciousLiteral` kind; `subprocess.run(["du", os.path.expanduser("~")])` would fire it
      too.
 
-  The end-to-end contracts for these stay red until each is decided; `e2e_safety` additionally
-  waits for the fetcher's `PackageRef::parse`.
+  **Items 1–3 closed 2026-09-30:** 1 by **ADR-022** (a data path is needed for Malicious),
+  2 and 3 by the **ADR-006 amendment on stateful objects**. Items 4 and 5 stay open.
+  `every_rule_fires_on_its_positive_fixture` stays red on PHX-PER-001 alone; `e2e_safety`
+  additionally waits for the fetcher's `PackageRef::parse`.
 
 - **2026-09-24, T-11 (rule engine) — what the catalogue cannot yet express.**
 
