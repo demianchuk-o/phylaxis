@@ -283,6 +283,14 @@ struct PendingReceiverWrite {
     def: NodeIndex,
 }
 
+/// One `open(…)` a handle was bound from: its call result, and the path's variable when the
+/// path is a plain name.
+#[derive(Clone)]
+struct Opened {
+    path: Option<String>,
+    call: NodeIndex,
+}
+
 struct Walker<'a> {
     table: &'a SymbolTable,
     calls: &'a CallGraph,
@@ -297,8 +305,8 @@ struct Walker<'a> {
     returns: BTreeMap<SymbolId, Vec<NodeIndex>>,
     reads: Vec<PendingRead>,
     package_calls: Vec<PendingCall>,
-    /// `(scope, handle) → path variables`: `fh` was bound from `open(target)` in `scope`.
-    opened_from: BTreeMap<(SymbolId, String), Vec<String>>,
+    /// `(scope, handle) → opens`: `fh` was bound from `open(…)` in `scope`.
+    opened_from: BTreeMap<(SymbolId, String), Vec<Opened>>,
     receiver_writes: Vec<PendingReceiverWrite>,
 }
 
@@ -411,18 +419,18 @@ impl Walker<'_> {
                 // `with a as b` and `except E as e`: the grammar's `as_pattern` holds the
                 // value as an unnamed child and the target under the field `alias`.
                 if let Some(alias) = ast.child_by_field(id, "alias") {
-                    let values: Vec<NodeIndex> = node
-                        .children
-                        .clone()
-                        .into_iter()
-                        .filter(|c| *c != alias)
-                        .flat_map(|c| self.eval(ast, c, owner, depth + 1))
-                        .collect();
-                    self.bind_target(ast, alias, owner, &values, depth + 1);
-                    for value in node.children.clone() {
-                        if value != alias {
-                            self.record_opened(ast, alias, value, owner);
+                    let mut values = Vec::new();
+                    let mut opened = Vec::new();
+                    for c in node.children.clone() {
+                        if c != alias {
+                            let v = self.eval(ast, c, owner, depth + 1);
+                            opened.push((c, v.clone()));
+                            values.extend(v);
                         }
+                    }
+                    self.bind_target(ast, alias, owner, &values, depth + 1);
+                    for (value, result) in opened {
+                        self.record_opened(ast, alias, value, &result, owner);
                     }
                     return;
                 }
@@ -502,7 +510,9 @@ impl Walker<'_> {
                     }
                     self.bind_target(ast, left, owner, &values, depth + 1);
                     if let Some(right) = ast.child_by_field(id, "right") {
-                        self.record_opened(ast, left, right, owner);
+                        if node.kind == AstKind::Assignment {
+                            self.record_opened(ast, left, right, &values, owner);
+                        }
                     }
                 }
                 values
@@ -777,8 +787,17 @@ impl Walker<'_> {
             .push(PendingReceiverWrite { owner, name, def });
     }
 
-    /// Remembers that `target` was bound from `open(path_var, …)`, when both are plain names.
-    fn record_opened(&mut self, ast: &Ast, target: AstNodeId, value: AstNodeId, owner: SymbolId) {
+    /// Remembers that the plain name `target` was bound from `open(…)`: the call's result
+    /// node (`result`, what `eval` returned for `value`) and, when the path is itself a plain
+    /// name, that name.
+    fn record_opened(
+        &mut self,
+        ast: &Ast,
+        target: AstNodeId,
+        value: AstNodeId,
+        result: &[NodeIndex],
+        owner: SymbolId,
+    ) {
         // The grammar wraps a `with … as fh` target in a node of its own around the name.
         let target = match ast.get(target) {
             Some(n) if n.kind != AstKind::Identifier && n.children.len() == 1 => n.children[0],
@@ -804,17 +823,16 @@ impl Walker<'_> {
             .child_by_field(value, "arguments")
             .and_then(|a| ast.get(a))
             .and_then(|a| a.children.first().copied());
-        let Some(first) =
-            first.filter(|f| ast.get(*f).map(|n| n.kind) == Some(AstKind::Identifier))
-        else {
-            return;
-        };
+        let path = first
+            .filter(|f| ast.get(*f).map(|n| n.kind) == Some(AstKind::Identifier))
+            .and_then(|f| ast.text_of(f))
+            .map(str::to_owned);
+        let [call] = result else { return };
         let handle = ast.text_of(target).unwrap_or_default().to_owned();
-        let path = ast.text_of(first).unwrap_or_default().to_owned();
         self.opened_from
             .entry((owner, handle))
             .or_default()
-            .push(path);
+            .push(Opened { path, call: *call });
     }
 
     /// The nearest scope, from `owner` outwards, that defines `name`; `owner` if none does.
@@ -835,7 +853,7 @@ impl Walker<'_> {
         let pending = std::mem::take(&mut self.receiver_writes);
         for write in pending {
             let scope = self.defining_scope(write.owner, &write.name);
-            let paths = self
+            let opened = self
                 .opened_from
                 .get(&(scope, write.name.clone()))
                 .cloned()
@@ -844,7 +862,9 @@ impl Walker<'_> {
                 .entry((scope, write.name))
                 .or_default()
                 .push(write.def);
-            for path in paths {
+            for Opened { path, call } in opened {
+                self.dfg.file_writes.push((write.def, call));
+                let Some(path) = path else { continue };
                 let path_scope = self.defining_scope(scope, &path);
                 let mut node = self.dfg.graph[write.def].clone();
                 node.label = path.clone();

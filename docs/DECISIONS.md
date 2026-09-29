@@ -281,8 +281,20 @@ would make `log.info(secret)` taint the logger and everything later read through
 `bind` is left out: binding a local address is not the socket receiving data. Like every
 read in this graph, the new definitions are flow-insensitive within their scope: a write
 taints reads of the variable before it as well as after. What is not covered: a handle
-opened on an expression (`open(os.path.join(d, n))`), `Path(p).write_bytes(x)`, and an
-object passed to a function that writes into it.
+opened on an expression (`open(os.path.join(d, n))`) gets no variable to carry the write
+back to; `Path(p).write_bytes(x)` and an object passed to a function that writes into it are
+not covered at all.
+
+The same bookkeeping gives the `<write:LOCATION>` persistence sinks their node. Every write
+into a handle bound from `open(…)`, whatever the path expression, is recorded as a pair
+(the write's definition, the `open` call) in `DataFlowGraph::file_writes`. The sink is the
+write's definition, so a data path ends where the bytes land. Where the file is comes from
+walking back from the `open` call and collecting the literals and external names its path
+was built from: `".bashrc"` for a home-relative pattern, a `.pth` literal plus
+`site.getsitepackages()` for `site-packages/*.pth`, a prefix for `/etc/cron`. The walk does
+not cross the write-back edges above, so what is *written* never decides where the file is.
+Literals joined from several pieces (`".config"`, `"autostart"`) are not reassembled; such a
+location is missed, not misnamed.
 
 ---
 
@@ -967,10 +979,10 @@ was applied meanwhile.
      `SuspiciousLiteral` kind; `subprocess.run(["du", os.path.expanduser("~")])` would fire it
      too.
 
-  **Items 1–3 closed 2026-09-30:** 1 by **ADR-022** (a data path is needed for Malicious),
-  2 and 3 by the **ADR-006 amendment on stateful objects**. Items 4 and 5 stay open.
-  `every_rule_fires_on_its_positive_fixture` stays red on PHX-PER-001 alone; `e2e_safety`
-  additionally waits for the fetcher's `PackageRef::parse`.
+  **Items 1–4 closed 2026-09-30:** 1 by **ADR-022** (a data path is needed for Malicious),
+  2 and 3 by the **ADR-006 amendment on stateful objects**, 4 by the persistence sinks in the
+  same amendment. Item 5 stays open. `e2e_rules` is 5/5; `e2e_safety` still waits for the
+  fetcher's `PackageRef::parse`.
 
 - **2026-09-24, T-11 (rule engine) — what the catalogue cannot yet express.**
 
@@ -981,7 +993,8 @@ was applied meanwhile.
      or source kinds) on `RuleSpec`. `Environment` reads are not targeted at all, because the
      key of `os.environ['CFLAGS']` is not in the graph and so `BUILD_ENV_ALLOWLIST` could not
      be applied.
-  2. **`<write:…>` persistence sinks match nothing.** They name a path an `open(…, "w")` or
+  2. *(closed 2026-09-30, ADR-006 amendment "stateful objects")* **`<write:…>` persistence
+     sinks match nothing.** They name a path an `open(…, "w")` or
      `write_text` writes to, and `find_sinks` matches callee names only. PHX-PER-001 cannot
      fire until they are matched the way `SensitiveFile` is. `winreg.SetValueEx` is the
      only persistence sink that works.

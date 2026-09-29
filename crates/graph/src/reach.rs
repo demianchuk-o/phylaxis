@@ -17,9 +17,9 @@ use petgraph::Direction;
 use petgraph::graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use phylaxis_core::{
-    Confidence, FileId, FlowEdgeKind, FlowNodeKind, Location, PackageGraph, PathStep, PathStepKind,
-    PhaseRoot, QualifiedName, ReachabilityKind, ReachabilityPath, Span, SymbolKind, TaintSink,
-    TaintSinkKind, TaintSource, TaintSourceKind,
+    Confidence, FileId, FlowEdge, FlowEdgeKind, FlowNode, FlowNodeKind, Location, PackageGraph,
+    PathStep, PathStepKind, PhaseRoot, QualifiedName, ReachabilityKind, ReachabilityPath, Span,
+    SymbolKind, TaintSink, TaintSinkKind, TaintSource, TaintSourceKind,
 };
 
 /// A catalogue source pattern: a kind plus a canonical dotted-name prefix (for calls) or
@@ -260,6 +260,107 @@ fn under(path: &str, prefix: &str) -> bool {
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+/// What a file path was built from: the string literals and the external names (calls and
+/// imported reads) that flow into an `open(…)` call.
+#[derive(Debug, Default)]
+struct PathParts {
+    literals: Vec<String>,
+    names: Vec<String>,
+}
+
+/// How far the walk back from `open(…)` goes. A path is built in a handful of steps; the
+/// bound only stops an attacker-written graph from making sink matching expensive.
+const MAX_PATH_PARTS_NODES: usize = 256;
+
+/// Walks the data-flow graph backwards from an `open(…)` call and collects its parts.
+///
+/// WHY the write-back edges are skipped: a write into a handle defines the opened path's
+/// variable (ADR-006), and reads are flow-insensitive, so walking back from `open(target)`
+/// would otherwise also collect whatever was *written* to `target`. The content is not the
+/// location; a downloaded URL ending in `/.bashrc` must not make the file look like one.
+fn path_parts(d: &petgraph::Graph<FlowNode, FlowEdge>, open: NodeIndex) -> PathParts {
+    let mut parts = PathParts::default();
+    let mut seen = BTreeSet::from([open]);
+    let mut queue = VecDeque::from([open]);
+    while let Some(i) = queue.pop_front() {
+        let n = &d[i];
+        match n.kind {
+            FlowNodeKind::Literal => parts.literals.push(n.label.clone()),
+            FlowNodeKind::CallResult | FlowNodeKind::Use if i != open => {
+                parts.names.push(n.label.clone())
+            }
+            _ => {}
+        }
+        for e in d.edges_directed(i, Direction::Incoming) {
+            let write_back = n.kind == FlowNodeKind::Definition
+                && matches!(&e.weight().kind, FlowEdgeKind::Transform { callee, .. } if callee.as_str() == "open");
+            if write_back || seen.len() >= MAX_PATH_PARTS_NODES {
+                continue;
+            }
+            if seen.insert(e.source()) {
+                queue.push_back(e.source());
+            }
+        }
+    }
+    parts
+}
+
+/// Calls and names that yield a site-packages directory.
+const SITE_DIRS: &[&str] = &[
+    "site.getsitepackages",
+    "site.getusersitepackages",
+    "site.USER_SITE",
+    "sysconfig.get_path",
+    "sysconfig.get_paths",
+    "distutils.sysconfig.get_python_lib",
+];
+
+/// Whether a file built from `parts` is the persistence location named by a `<write:…>`
+/// pattern.
+///
+/// - `site-packages/*.pth`: a literal ending in `.pth` and a site directory, from a
+///   [`SITE_DIRS`] call or a literal naming `site-packages` / `dist-packages`.
+/// - An absolute pattern (`/etc/cron`) is a prefix of some literal, so `/etc/cron.d/job` and
+///   `/etc/crontab` both match.
+/// - A home-relative or bare pattern (`~/.bashrc`, `sitecustomize.py`) matches a literal that,
+///   with a leading home prefix dropped, is the path, lies under it, or ends with it. The
+///   home directory is usually computed, so `os.path.join(Path.home(), ".bashrc")` has
+///   `.bashrc` as its literal.
+///
+/// Parts of a path joined from several literals (`".config"`, `"autostart"`) are not joined
+/// back together; such a location is missed, not misnamed.
+fn written_location_matches(pattern: &str, parts: &PathParts) -> bool {
+    if pattern == "site-packages/*.pth" {
+        let pth = parts
+            .literals
+            .iter()
+            .any(|l| normalised(l).ends_with(".pth"));
+        let site = parts.names.iter().any(|n| {
+            SITE_DIRS
+                .iter()
+                .any(|s| QualifiedName::new(n.as_str()).is_under(s))
+        }) || parts.literals.iter().any(|l| {
+            let v = normalised(l);
+            v.contains("site-packages") || v.contains("dist-packages")
+        });
+        return pth && site;
+    }
+    parts.literals.iter().any(|l| {
+        let v = normalised(l);
+        if pattern.starts_with('/') {
+            return v.starts_with(pattern);
+        }
+        let relative = pattern.strip_prefix("~/").unwrap_or(pattern);
+        let rest = ["~/", "$HOME/", "${HOME}/", "%USERPROFILE%/"]
+            .iter()
+            .find_map(|prefix| v.strip_prefix(prefix))
+            .unwrap_or(&v);
+        under(rest, relative)
+            || rest.ends_with(&format!("/{relative}"))
+            || rest.contains(&format!("/{relative}/"))
+    })
+}
+
 fn sensitive_path(pattern: &str, value: &str) -> bool {
     let v = normalised(value);
     match pattern.strip_prefix("~/") {
@@ -393,6 +494,32 @@ pub fn find_sinks(pg: &PackageGraph, patterns: &[SinkPattern]) -> Vec<TaintSink>
                 node: i,
                 definition,
             });
+        }
+    }
+    // `<write:LOCATION>`: a write into a handle opened on that location. The sink node is
+    // the write itself, so a path ends where the bytes land.
+    let write_patterns: Vec<(&SinkPattern, &str)> = patterns
+        .iter()
+        .filter_map(|p| Some((p, p.pattern.strip_prefix("<write:")?.strip_suffix('>')?)))
+        .collect();
+    if !write_patterns.is_empty() {
+        for &(write, open) in &pg.dfg.file_writes {
+            let n = &d[write];
+            let Some(definition) = pg.call_graph.node_of(n.owner) else {
+                continue;
+            };
+            let parts = path_parts(d, open);
+            for (p, location_pattern) in &write_patterns {
+                if written_location_matches(location_pattern, &parts) {
+                    out.push(TaintSink {
+                        kind: p.kind,
+                        pattern: QualifiedName::new(p.pattern),
+                        location: location(pg, n.file, n.span),
+                        node: write,
+                        definition,
+                    });
+                }
+            }
         }
     }
     out.sort_by(|a, b| (&a.location, a.node, a.kind).cmp(&(&b.location, b.node, b.kind)));
@@ -876,6 +1003,97 @@ mod tests {
         assert!(literal_matches(&root, "C:\\"));
         assert!(!literal_matches(&root, "build/"));
         assert!(!literal_matches(&root, ""));
+    }
+
+    const PERSIST: &[SinkPattern] = &[
+        SinkPattern {
+            kind: TaintSinkKind::PersistenceWrite,
+            pattern: "<write:~/.bashrc>",
+            arg: None,
+        },
+        SinkPattern {
+            kind: TaintSinkKind::PersistenceWrite,
+            pattern: "<write:/etc/cron>",
+            arg: None,
+        },
+        SinkPattern {
+            kind: TaintSinkKind::PersistenceWrite,
+            pattern: "<write:site-packages/*.pth>",
+            arg: None,
+        },
+    ];
+
+    fn persistence_sinks(src: &str) -> Vec<String> {
+        let g = graph_from_sources(&[("pkg/a.py", src)]);
+        find_sinks(&g, PERSIST)
+            .into_iter()
+            .map(|s| s.pattern.as_str().to_owned())
+            .collect()
+    }
+
+    // `<write:…>` sinks: a write into a handle, matched on what the opened path is built
+    // from, however the handle and the path are bound.
+    #[test]
+    fn persistence_writes_match_on_the_opened_location() {
+        assert_eq!(
+            persistence_sinks(
+                "import os
+rc = os.path.join(os.path.expanduser('~'), '.bashrc')
+with open(rc, 'a') as fh:
+    fh.write('x')
+"
+            ),
+            ["<write:~/.bashrc>"]
+        );
+        assert_eq!(
+            persistence_sinks(
+                "fh = open('/etc/cron.d/job', 'w')
+fh.write('x')
+"
+            ),
+            ["<write:/etc/cron>"]
+        );
+        assert_eq!(
+            persistence_sinks(
+                "import os, site
+t = os.path.join(site.getsitepackages()[0], 'a.pth')
+with open(t, 'wb') as fh:
+    fh.write(b'x')
+"
+            ),
+            ["<write:site-packages/*.pth>"]
+        );
+    }
+
+    // An ordinary file is not a persistence location, a `.pth` outside site-packages is not
+    // either, and what is *written* never decides where the file is.
+    #[test]
+    fn other_writes_are_not_persistence_sinks() {
+        assert!(
+            persistence_sinks(
+                "with open('out.json', 'w') as fh:
+    fh.write('x')
+"
+            )
+            .is_empty()
+        );
+        assert!(
+            persistence_sinks(
+                "with open('build/a.pth', 'w') as fh:
+    fh.write('x')
+"
+            )
+            .is_empty()
+        );
+        assert!(
+            persistence_sinks(
+                "t = 'out.txt'
+with open(t, 'w') as fh:
+    fh.write('http://c.invalid/.bashrc')
+"
+            )
+            .is_empty()
+        );
     }
 
     // Control reachability: from the install root to a network sink through a helper.

@@ -160,6 +160,10 @@ pub struct FlowEdge {
 #[derive(Debug, Clone, Default)]
 pub struct DataFlowGraph {
     pub graph: DiGraph<FlowNode, FlowEdge>,
+    /// Writes into file handles, as `(write, open)`: the definition that `fh.write(x)`
+    /// creates, and the `open(…)` call result `fh` was bound from. Where the file is comes
+    /// from what flows into `open`; persistence sinks are matched on that (ADR-006).
+    pub file_writes: Vec<(NodeIndex, NodeIndex)>,
 }
 
 /// [8] Everything the rule engine queries for one distribution.
