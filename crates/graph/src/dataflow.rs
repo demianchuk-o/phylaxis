@@ -1116,72 +1116,211 @@ impl Walker<'_> {
     }
 
     /// Actual → formal and return → result, for every call into a package definition.
+    ///
+    /// A call with more than [`FANOUT_HUB_MIN`] candidate targets is wired through hubs
+    /// (see [`FANOUT_HUB_MIN`]); a narrower one directly, so that its evidence path names the
+    /// parameter it enters without an intermediate step.
     fn resolve_package_calls(&mut self) {
         let pending = std::mem::take(&mut self.package_calls);
+        let mut hubs: BTreeMap<HubKey, BTreeMap<Slot, NodeIndex>> = BTreeMap::new();
         for call in pending {
-            for (callee, confidence) in &call.targets {
-                let params = self.params.get(callee).cloned().unwrap_or_default();
-                let callee_kind = self.table.get(*callee).map(|s| s.kind);
-                let is_init = self
-                    .table
-                    .get(*callee)
-                    .is_some_and(|s| s.name == "__init__");
-                // `obj.m(a)` binds `obj` to `self`; `C(a)` binds a fresh object to
-                // `__init__`'s `self`, so the first actual lands in the second formal.
-                let mut offset = 0;
-                if callee_kind == Some(SymbolKind::Method) {
-                    if !call.receiver.is_empty() {
-                        if let Some((_, self_param)) = params.first() {
-                            for r in &call.receiver {
-                                let span = self.dfg.graph[*r].span;
-                                self.edge(
-                                    *r,
-                                    *self_param,
-                                    FlowEdgeKind::Argument,
-                                    span,
-                                    *confidence,
-                                );
-                            }
-                        }
-                        offset = 1;
-                    } else if is_init {
-                        offset = 1;
-                    }
+            if call.targets.len() <= FANOUT_HUB_MIN {
+                for (callee, confidence) in &call.targets {
+                    self.wire(&call, *callee, *confidence);
                 }
-                for (i, (span, values)) in call.positional.iter().enumerate() {
-                    if let Some((_, formal)) = params.get(offset + i) {
-                        for v in values {
-                            self.edge(*v, *formal, FlowEdgeKind::Argument, *span, *confidence);
-                        }
-                    }
+                continue;
+            }
+            let mut targets = call.targets.clone();
+            targets.sort();
+            let key = (targets, !call.receiver.is_empty());
+            let mut h = hubs.remove(&key).unwrap_or_default();
+            // Actuals into the hubs, each at `Resolved`: the call's own uncertainty sits on
+            // the hub → formal edges, one per candidate, exactly where it sat before.
+            for (slot, span, values) in self.slots(&call) {
+                let hub = self.hub(&mut h, &call, &slot);
+                for v in values {
+                    self.edge(v, hub, FlowEdgeKind::Argument, span, Confidence::Resolved);
                 }
-                for (name, span, values) in &call.keyword {
-                    if let Some((_, formal)) = params.iter().find(|(p, _)| p == name) {
-                        for v in values {
-                            self.edge(*v, *formal, FlowEdgeKind::Argument, *span, *confidence);
-                        }
-                    }
+            }
+            let result_span = self.dfg.graph[call.result].span;
+            let ret = self.hub(&mut h, &call, &Slot::Return);
+            self.edge(
+                ret,
+                call.result,
+                FlowEdgeKind::Return,
+                result_span,
+                Confidence::Resolved,
+            );
+            hubs.insert(key, h);
+        }
+    }
+
+    /// The argument slots a call fills, with their actual values.
+    fn slots(&self, call: &PendingCall) -> Vec<(Slot, Span, Vec<NodeIndex>)> {
+        let mut out = Vec::new();
+        if let Some(r) = call.receiver.first() {
+            out.push((
+                Slot::Receiver,
+                self.dfg.graph[*r].span,
+                call.receiver.clone(),
+            ));
+        }
+        for (i, (span, values)) in call.positional.iter().enumerate() {
+            out.push((Slot::Positional(i), *span, values.clone()));
+        }
+        for (name, span, values) in &call.keyword {
+            out.push((Slot::Keyword(name.clone()), *span, values.clone()));
+        }
+        for (span, values) in &call.splat {
+            out.push((Slot::Splat, *span, values.clone()));
+        }
+        out
+    }
+
+    /// The hub for one slot of one target set, created on first use together with its
+    /// edges to (or, for the return slot, from) every candidate.
+    fn hub(
+        &mut self,
+        h: &mut BTreeMap<Slot, NodeIndex>,
+        call: &PendingCall,
+        slot: &Slot,
+    ) -> NodeIndex {
+        if let Some(n) = h.get(slot) {
+            return *n;
+        }
+        let at = &self.dfg.graph[call.result];
+        let name = call
+            .targets
+            .first()
+            .and_then(|(t, _)| self.table.get(*t))
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let node = FlowNode {
+            kind: FlowNodeKind::Use,
+            file: at.file,
+            span: at.span,
+            ast_node: at.ast_node,
+            symbol: None,
+            owner: at.owner,
+            label: format!("<any of {} `{name}`>", call.targets.len()),
+        };
+        let span = node.span;
+        let hub = self.dfg.graph.add_node(node);
+        h.insert(slot.clone(), hub);
+        for (callee, confidence) in call.targets.clone() {
+            if *slot == Slot::Return {
+                for ret in self.returns.get(&callee).cloned().unwrap_or_default() {
+                    self.edge(ret, hub, FlowEdgeKind::Return, span, confidence);
                 }
-                for (span, values) in &call.splat {
-                    for (_, formal) in params.iter().skip(offset) {
-                        for v in values {
-                            self.edge(*v, *formal, FlowEdgeKind::Argument, *span, *confidence);
-                        }
-                    }
+                continue;
+            }
+            let (params, offset) = self.formals(call, callee);
+            let formals: Vec<NodeIndex> = match slot {
+                Slot::Receiver if offset == 1 => {
+                    params.first().map(|(_, p)| *p).into_iter().collect()
                 }
-                let result_span = self.dfg.graph[call.result].span;
-                for ret in self.returns.get(callee).cloned().unwrap_or_default() {
-                    self.edge(
-                        ret,
-                        call.result,
-                        FlowEdgeKind::Return,
-                        result_span,
-                        *confidence,
-                    );
+                Slot::Receiver | Slot::Return => Vec::new(),
+                Slot::Positional(i) => params
+                    .get(offset + i)
+                    .map(|(_, p)| *p)
+                    .into_iter()
+                    .collect(),
+                Slot::Keyword(k) => params
+                    .iter()
+                    .filter(|(p, _)| p == k)
+                    .map(|(_, p)| *p)
+                    .collect(),
+                Slot::Splat => params.iter().skip(offset).map(|(_, p)| *p).collect(),
+            };
+            for f in formals {
+                self.edge(hub, f, FlowEdgeKind::Argument, span, confidence);
+            }
+        }
+        hub
+    }
+
+    /// A callee's parameters, and how many leading ones the actuals skip: `obj.m(a)` binds
+    /// `obj` to `self`, and `C(a)` binds a fresh object to `__init__`'s `self`, so the first
+    /// actual lands in the second formal.
+    fn formals(&self, call: &PendingCall, callee: SymbolId) -> (Vec<(String, NodeIndex)>, usize) {
+        let params = self.params.get(&callee).cloned().unwrap_or_default();
+        let symbol = self.table.get(callee);
+        let is_method = symbol.map(|s| s.kind) == Some(SymbolKind::Method);
+        let is_init = symbol.is_some_and(|s| s.name == "__init__");
+        let offset = usize::from(is_method && (!call.receiver.is_empty() || is_init));
+        (params, offset)
+    }
+
+    /// Direct wiring of one call to one target.
+    fn wire(&mut self, call: &PendingCall, callee: SymbolId, confidence: Confidence) {
+        let (params, offset) = self.formals(call, callee);
+        if offset == 1 && !call.receiver.is_empty() {
+            if let Some((_, self_param)) = params.first() {
+                for r in &call.receiver {
+                    let span = self.dfg.graph[*r].span;
+                    self.edge(*r, *self_param, FlowEdgeKind::Argument, span, confidence);
                 }
             }
         }
+        for (i, (span, values)) in call.positional.iter().enumerate() {
+            if let Some((_, formal)) = params.get(offset + i) {
+                for v in values {
+                    self.edge(*v, *formal, FlowEdgeKind::Argument, *span, confidence);
+                }
+            }
+        }
+        for (name, span, values) in &call.keyword {
+            if let Some((_, formal)) = params.iter().find(|(p, _)| p == name) {
+                for v in values {
+                    self.edge(*v, *formal, FlowEdgeKind::Argument, *span, confidence);
+                }
+            }
+        }
+        for (span, values) in &call.splat {
+            for (_, formal) in params.iter().skip(offset) {
+                for v in values {
+                    self.edge(*v, *formal, FlowEdgeKind::Argument, *span, confidence);
+                }
+            }
+        }
+        let result_span = self.dfg.graph[call.result].span;
+        for ret in self.returns.get(&callee).cloned().unwrap_or_default() {
+            self.edge(
+                ret,
+                call.result,
+                FlowEdgeKind::Return,
+                result_span,
+                confidence,
+            );
+        }
     }
+}
+
+/// Above this many candidate targets a call is wired through hubs.
+///
+/// WHY hubs: a call resolved by method name alone (ADR-005, the any-callee fan-out) can have
+/// hundreds of candidates, and wiring every call site to every candidate grows as
+/// sites × candidates. On `transformers` 5.17 that asked for a 20 GiB edge vector
+/// (SAFETY.md G4). One hub node per (target set, argument slot) carries the same
+/// reachability, because every actual of a slot already reached that slot's formal in every
+/// candidate, with sites + candidates edges instead. Nothing appears or disappears: each
+/// hub → formal edge keeps its candidate's own confidence, and the actual → hub edge is
+/// `Resolved`, so a path's minimum confidence is what it was. Narrow calls stay direct,
+/// where a hub would only add a step to the evidence.
+const FANOUT_HUB_MIN: usize = 8;
+
+/// A wide call's candidate targets, sorted, and whether it has a receiver: calls that agree
+/// on both land in the same formals, so they share hubs.
+type HubKey = (Vec<(SymbolId, Confidence)>, bool);
+
+/// Where an actual lands in a callee, or, for `Return`, where the callee's value leaves.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Slot {
+    Receiver,
+    Positional(usize),
+    Keyword(String),
+    Splat,
+    Return,
 }
 
 /// Whether a string node contains an f-string interpolation anywhere below it.
@@ -1353,6 +1492,48 @@ mod tests {
             "os.environ",
             (FlowNodeKind::Definition, "x")
         ));
+    }
+
+    // A call with more than FANOUT_HUB_MIN candidates goes through hubs, and reaches exactly
+    // what direct wiring reached: the argument every candidate's parameter, every
+    // candidate's return the result.
+    #[test]
+    fn wide_fan_out_through_hubs_keeps_reachability() {
+        let mut src = String::from(
+            "import os
+",
+        );
+        for i in 0..(FANOUT_HUB_MIN + 2) {
+            src.push_str(&format!(
+                "class C{i}:
+    def m(self, x):
+        y{i} = x
+        return y{i}
+"
+            ));
+        }
+        src.push_str(
+            "def f(obj):
+    r = obj.m(os.environ['S'])
+",
+        );
+        let g = graph_from_sources(&[("pkg/a.py", &src)]);
+        let d = &g.dfg.graph;
+        assert!(
+            d.node_indices().any(|i| d[i].label.starts_with("<any of")),
+            "hub expected"
+        );
+        for i in 0..(FANOUT_HUB_MIN + 2) {
+            assert!(
+                reaches(
+                    d,
+                    "os.environ",
+                    (FlowNodeKind::Definition, &format!("y{i}"))
+                ),
+                "y{i}"
+            );
+        }
+        assert!(reaches(d, "os.environ", (FlowNodeKind::Definition, "r")));
     }
 
     // `len(secret)` drops taint: len is not on the list, so no edge into its result.
