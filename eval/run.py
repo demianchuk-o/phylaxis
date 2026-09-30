@@ -30,7 +30,6 @@ import shutil
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 import zipfile
 from pathlib import Path
 
@@ -38,6 +37,7 @@ import phylaxis
 
 from acquire import DATA, HERE
 from manifest import PASSWORD
+from resume import run_resumable
 
 WORK = Path(os.environ.get("PHYLAXIS_EVAL_WORK", DATA / "unpacked"))
 THRESHOLDS = {"primary": 0.40, "strict": 0.70}
@@ -186,10 +186,10 @@ def main() -> None:
     entries = [e for e in json.loads((HERE / "manifest.json").read_text(encoding="utf-8"))["entries"] if e.get("split") == args.split]
     (DATA / "results").mkdir(parents=True, exist_ok=True)
     for m in ("ABCD" if args.all_modes else args.mode):
-        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-            rows = list(pool.map(lambda e, m=m: isolated(e, m, args.timeout), entries))
         out = DATA / "results" / f"{args.split}-{m}.jsonl"
-        out.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        rows = run_resumable(
+            entries, lambda e, m=m: isolated(e, m, args.timeout), out, args.jobs, f"phylaxis {m}"
+        )
         print(f"== {args.split} mode {m} ({out})")
         print(json.dumps(metrics(rows), indent=1))
 

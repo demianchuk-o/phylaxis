@@ -30,8 +30,10 @@ import subprocess
 import tempfile
 import time
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+
 from pathlib import Path
+
+from resume import run_resumable
 
 HERE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("PHYLAXIS_EVAL_DATA", HERE.parent.parent / "eval-data"))
@@ -142,10 +144,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{args.split}-baseline-versions.json").write_text(json.dumps(versions(), indent=1) + "\n", encoding="utf-8")
     for tool in (["guarddog", "aura"] if args.tool == "both" else [args.tool]):
-        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-            rows = list(pool.map(lambda e, t=tool: one(e, t, args.timeout), entries))
         out = out_dir / f"{args.split}-{tool}.jsonl"
-        out.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        rows = run_resumable(entries, lambda e, t=tool: one(e, t, args.timeout), out, args.jobs, tool)
         errors = sum("error" in r for r in rows)
         print(f"{tool}: {len(rows)} rows, {errors} errors -> {out}")
 
