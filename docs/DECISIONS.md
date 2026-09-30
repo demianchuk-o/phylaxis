@@ -945,6 +945,61 @@ identified by a single ruleset (GuardDog)". GuardDog is one of the two baselines
 
 ---
 
+## ADR-024 — A root literal used only as a separator is not a source
+
+**Date:** 2026-09-30. **Status:** accepted. Closes item 5 of the "2026-09-24, T-12" request
+for the case the development set showed. Decided on development-set evidence
+(EVALUATION.md §3); the test set has not been run.
+
+### Context
+
+`<literal:home-or-root-path>` accepts `"/"`, `"~"`, a bare drive and a few home directories:
+`shutil.rmtree("/")` is the shape it exists for. But `"/"` and `"\\"` alone are far more
+often separators. On the first development-set run the benign `blis` scored Malicious (0.90)
+on nothing but `spec["source"].replace("/", "\\")` reaching `subprocess`: six
+PHX-DRP-003 findings and one PHX-SAB-001, every one of them starting at a separator.
+
+### Alternatives considered
+
+1. **Drop `"/"` from the shape.** Rejected: `rmtree("/")` and `os.path.join("/", d)` are
+   real, and a missing source is silence.
+2. **Let rules select shapes within `SuspiciousLiteral`** (the rest of item 5). Deferred:
+   it narrows which rules see the shape, not what the shape means, and the separator
+   false positive would remain in the rules that keep it.
+3. **Exempt a literal whose every use is as a separator or affix of a string method.**
+   Chosen.
+
+### Choice
+
+A `home-or-root-path` literal is not a source when every outgoing edge enters a string
+method from a closed list (`replace`, `split`, `rsplit`, `join`, `strip`/`lstrip`/`rstrip`,
+`startswith`, `endswith`, `partition`, `rpartition`, `count`, `find`/`rfind`,
+`index`/`rindex`, `removeprefix`, `removesuffix`), either as a taint-preserving transform
+or as an argument to the method's parameter node. Path APIs never count as separator uses,
+whatever their method is called: `os.path.join("/", d)` builds a path from the root. A
+literal with no uses is kept.
+
+### Consequences
+
+Development set (20 + 20), before → after, primary τ = 0.40 unchanged in every
+configuration; strict τ = 0.70:
+
+| Config | Precision | Recall | F1 | FP |
+|---|---|---|---|---|
+| A | 0.769 → 0.833 | 0.50 → 0.50 | 0.606 → 0.625 | 3 → 2 |
+| B | 0.833 → 0.909 | 0.50 → 0.50 | 0.625 → 0.645 | 2 → 1 |
+| C | 0.727 → 0.778 | 0.40 → 0.35 | 0.516 → 0.483 | 3 → 2 |
+| D | 0.778 → 0.857 | 0.35 → 0.30 | 0.483 → 0.444 | 2 → 1 |
+
+Two verdicts moved: benign `blis` from Malicious to Suspicious in all four configurations,
+and malicious `colimer` from Malicious to Suspicious in C and D. `colimer` is a credential
+stealer whose PHX-SAB-001 finding ("destructive operation on user data") came from
+`path.split("/")` separators reaching a file removal: a right verdict for a wrong reason.
+What it shows is a different gap, recorded for the error analysis: no exfiltration rule
+fires on it, because the sensitive-file catalogue does not name browser profile stores.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading

@@ -101,7 +101,10 @@ pub fn find_sources(pg: &PackageGraph, patterns: &[SourcePattern]) -> Vec<TaintS
             TaintSourceKind::SensitiveFile | TaintSourceKind::SuspiciousLiteral => {
                 for i in d.node_indices() {
                     let n = &d[i];
-                    if n.kind == FlowNodeKind::Literal && literal_matches(p, &n.label) {
+                    if n.kind == FlowNodeKind::Literal
+                        && literal_matches(p, &n.label)
+                        && !(p.pattern == "<literal:home-or-root-path>" && only_a_separator(d, i))
+                    {
                         out.push(TaintSource {
                             kind: p.kind,
                             pattern: QualifiedName::new(p.pattern),
@@ -437,6 +440,61 @@ fn wallet_address(value: &str) -> bool {
     let ethereum =
         v.len() == 42 && v.starts_with("0x") && v[2..].chars().all(|c| c.is_ascii_hexdigit());
     bitcoin || bech32 || ethereum
+}
+
+/// String methods in which a literal is a separator or an affix, not a path:
+/// `x.replace("/", "\\")`, `s.split("/")`, `"/".join(parts)`, `p.rstrip("/")`.
+const SEPARATOR_METHODS: &[&str] = &[
+    "replace",
+    "split",
+    "rsplit",
+    "join",
+    "strip",
+    "lstrip",
+    "rstrip",
+    "startswith",
+    "endswith",
+    "partition",
+    "rpartition",
+    "count",
+    "find",
+    "rfind",
+    "index",
+    "rindex",
+    "removeprefix",
+    "removesuffix",
+];
+
+/// Whether every use of the literal at `node` is as a separator or affix of a string
+/// method, so that it never stands for a directory (ADR-024).
+///
+/// WHY: `<literal:home-or-root-path>` accepts `"/"`, and `"/"` or `"\\"` alone are far more
+/// often separators than the root directory. The first development-set run flagged two
+/// popular benign packages as Malicious on nothing but `path.replace("/", "\\")` reaching
+/// `subprocess`. A literal with no uses at all is kept: there is nothing to exempt it on.
+/// Path functions are never separator uses, even when named like one: `os.path.join("/",
+/// d)` builds a path from the root.
+fn only_a_separator(d: &petgraph::Graph<FlowNode, FlowEdge>, node: NodeIndex) -> bool {
+    let separator_call = |callee: &str| {
+        let method = callee.rsplit('.').next().unwrap_or(callee);
+        let path_api = ["os.path", "pathlib", "posixpath", "ntpath"]
+            .iter()
+            .any(|p| QualifiedName::new(callee).is_under(p));
+        !path_api && SEPARATOR_METHODS.contains(&method)
+    };
+    let mut uses = d.edges_directed(node, Direction::Outgoing).peekable();
+    uses.peek().is_some()
+        && uses.all(|e| match &e.weight().kind {
+            // A taint-preserving method (`replace`, `split`, `join`): the callee is on the edge.
+            FlowEdgeKind::Transform { callee, .. } => separator_call(callee.as_str()),
+            // Any other method (`startswith`, `find`): the argument enters the callee's
+            // parameter node, which carries the callee's name.
+            FlowEdgeKind::Argument => {
+                let to = &d[e.target()];
+                to.kind == FlowNodeKind::Parameter && separator_call(&to.label)
+            }
+            _ => false,
+        })
 }
 
 fn home_or_root(value: &str) -> bool {
@@ -1156,6 +1214,70 @@ with open(t, 'w') as fh:
 "
             )
             .is_empty()
+        );
+    }
+
+    // ADR-024: a root literal used only as a separator or affix of a string method is not
+    // a source; used as a path, including through `os.path.join`, it still is.
+    #[test]
+    fn separator_uses_of_a_root_literal_are_not_sources() {
+        let root = [SourcePattern {
+            kind: TaintSourceKind::SuspiciousLiteral,
+            pattern: "<literal:home-or-root-path>",
+        }];
+        let count =
+            |src: &str| find_sources(&graph_from_sources(&[("pkg/a.py", src)]), &root).len();
+        assert_eq!(
+            count(
+                "import subprocess
+def f(x):
+    subprocess.run(x.replace('/', '\\'))
+"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                "def f(x):
+    return '/'.join(x.split('/'))
+"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                "def f(p):
+    return p.startswith('/')
+"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                "import shutil
+def f():
+    shutil.rmtree('/')
+"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                "import os
+def f(d):
+    return os.path.join('/', d)
+"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                "import shutil
+def f():
+    shutil.rmtree('~')
+"
+            ),
+            1
         );
     }
 
