@@ -72,8 +72,14 @@ FP. Noise captures the per-finding cost separately.
 | Tool | Invocation | "Flagged" | Notes |
 |---|---|---|---|
 | GuardDog | `guarddog pypi scan <sdist>` with the default rule set, network heuristics disabled if the version allows, else results with only metadata rules are excluded and noted | at least one source-code rule result | Version pinned in RESULTS.md. |
-| Aura | `aura scan <sdist>` with default configuration | Aura's own score above its default threshold, recorded | If Aura cannot be installed on the evaluation machine, RESULTS.md says so and E2 is answered with GuardDog only. |
+| Aura | `aura scan <sdist>` with the default analyzers except the one that needs the network (`eval/README.md`) | **score > 0** (amended 2026-09-30, before the test run: Aura defines no default threshold); the full precision–recall curve over its score is reported too | If Aura cannot be installed on the evaluation machine, RESULTS.md says so and E2 is answered with GuardDog only. |
 | phylaxis | `phylaxis.scan_many(files)` | as in §4 | Same machine, same file list, same order. |
+
+**Why score > 0 for Aura.** The question E2 asks is what each tool *detects*, not whether a
+finding is bad enough by some tool's taste: every tool here grades severity its own way, and
+phylaxis's own lower operating point also flags anything Suspicious. "Aura scored something"
+is the most literal reading of Aura's output and the one least open to a charge of choosing
+the threshold that suits us. Because Aura scores, its whole curve is reported alongside.
 
 All three run over the identical file list from `eval/manifest.json`. Parse failures and
 crashes of a baseline are counted as "not flagged" and listed.
