@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 import zipfile
 
 from pathlib import Path
@@ -97,11 +98,18 @@ def guarddog(path: Path, timeout: float) -> dict:
 def aura(path: Path, timeout: float) -> dict:
     mount = path if path.is_dir() else path.parent
     target = "/data" if path.is_dir() else f"/data/{path.name}"
-    done = subprocess.run(
-        ["docker", "run", "--rm", "--network", "none", "-v", f"{mount}:/data:ro", AURA_IMAGE, "scan", target, "-f", "json",
-         *[arg for a in AURA_ANALYZERS for arg in ("-a", a)]],
-        capture_output=True, text=True, timeout=timeout,
-    )
+    name = f"phx-aura-{uuid.uuid4().hex}"
+    try:
+        done = subprocess.run(
+            ["docker", "run", "--rm", "--name", name, "--network", "none", "-v", f"{mount}:/data:ro", AURA_IMAGE, "scan", target, "-f", "json",
+             *[arg for a in AURA_ANALYZERS for arg in ("-a", a)]],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # The timeout kills the docker client only; the container would keep scanning and
+        # slow every later sample.
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        raise
     scans = json_tail(done.stdout).get("scans") or []
     score = max((s.get("score") or 0 for s in scans), default=0)
     types = sorted({d.get("type") for s in scans for d in s.get("detections", []) if d.get("score")})
@@ -140,6 +148,10 @@ def main() -> None:
     args = p.parse_args()
 
     entries = [e for e in json.loads((HERE / "manifest.json").read_text(encoding="utf-8"))["entries"] if e.get("split") == args.split]
+    # Without a reachable daemon every Aura row fails in a second, and a finished file of error
+    # rows is then skipped by every resume. Stop before writing anything instead.
+    if args.tool in ("aura", "both") and subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+        raise SystemExit("docker daemon not reachable (is Docker Desktop running?); nothing written")
     out_dir = DATA / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{args.split}-baseline-versions.json").write_text(json.dumps(versions(), indent=1) + "\n", encoding="utf-8")
