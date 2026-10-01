@@ -109,8 +109,33 @@ def scan_entry(entry: dict, mode: str) -> dict:
             skipped=report.get("skipped"),
             rules=sorted({f["rule"] for f in report["findings"]}),
             findings=len(report["findings"]),
+            **finding_summary(report["findings"]),
         )
     return row
+
+
+def finding_summary(findings: list[dict]) -> dict:
+    """Findings folded into distinct shapes, enough to recompute the package risk under a
+    filter (confidence, phase, path length) without rescanning. A large package can carry
+    tens of thousands of paths that differ only in location; their shapes are a handful.
+
+    `shapes`: [rule, objective, path kind, score, confidence, phase, steps, ambiguous
+    steps, count]. `sinks`: distinct (rule, sink file, sink line), the per-finding cost an
+    auditor sees once duplicate paths to one call are merged."""
+    shapes: dict[tuple, int] = {}
+    sinks = set()
+    for f in findings:
+        path = f["evidence"]["path"]
+        steps = path["steps"]
+        key = (
+            f["rule"], f["technique"]["objective"], path["kind"], round(f["score"], 4),
+            f["confidence"], f["phase"], len(steps),
+            sum(s["symbol"].startswith("<any of") for s in steps),
+        )
+        shapes[key] = shapes.get(key, 0) + 1
+        end = steps[-1]["location"] if steps else {}
+        sinks.add((f["rule"], end.get("path"), end.get("span", {}).get("start_line")))
+    return {"shapes": [[*k, n] for k, n in sorted(shapes.items())], "sinks": len(sinks)}
 
 
 def isolated(entry: dict, mode: str, timeout: float) -> dict:
