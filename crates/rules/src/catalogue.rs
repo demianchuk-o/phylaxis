@@ -8,8 +8,12 @@ use phylaxis_core::{
 use phylaxis_graph::reach::{SinkPattern, SourcePattern};
 use serde::Serialize;
 
-/// Bumped on any change to this file or to the report schema (ADR-017).
-pub const RULESET_VERSION: RulesetVersion = RulesetVersion(1);
+/// Bumped on any change to this file, to the report schema, or to the analysis that turns
+/// the same rules into different findings (ADR-017): the cache key is the file's hash plus
+/// this number, so a change that moves results without moving it serves stale reports.
+/// 2: receiver typing (ADR-025), a namesake no longer hides a receiver write, phase-filtered
+/// co-occurrence roots.
+pub const RULESET_VERSION: RulesetVersion = RulesetVersion(2);
 
 // ── Source patterns (ADR-006) ─────────────────────────────────────────────────────────
 // Canonical dotted prefixes after import aliasing. `SensitiveFile` patterns are path

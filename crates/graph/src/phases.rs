@@ -273,6 +273,67 @@ mod tests {
         );
     }
 
+    // A function handed to a thread, a process, `atexit` or an executor runs because the
+    // caller started it: it inherits the caller's phase. Without the callback edge each of
+    // these payloads would be Runtime.
+    #[test]
+    fn callbacks_inherit_the_phase_of_the_code_that_starts_them() {
+        let (symbols, _, phases) = phases_from_sources(&[
+            (
+                "setup.py",
+                "import threading, atexit
+from concurrent.futures import ThreadPoolExecutor
+                 from setuptools import setup
+from pkg.p import a, b, c, d
+                 threading.Thread(target=a, daemon=True).start()
+                 threading.Timer(5, b).start()
+atexit.register(c)
+                 with ThreadPoolExecutor() as ex:
+    ex.submit(d)
+setup(name='pkg')
+",
+            ),
+            (
+                "pkg/__init__.py",
+                "import threading
+from pkg.p import e
+threading.Thread(target=lambda: e()).start()
+",
+            ),
+            (
+                "pkg/p.py",
+                "def a():
+    pass
+def b():
+    pass
+def c():
+    pass
+def d():
+    pass
+                 def e():
+    pass
+def never_started():
+    pass
+",
+            ),
+        ]);
+        for name in ["pkg.p.a", "pkg.p.b", "pkg.p.c", "pkg.p.d"] {
+            assert_eq!(
+                phase_of(&symbols, &phases, name),
+                ExecutionPhase::Install,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            phase_of(&symbols, &phases, "pkg.p.e"),
+            ExecutionPhase::Import
+        );
+        assert_eq!(
+            phase_of(&symbols, &phases, "pkg.p.never_started"),
+            ExecutionPhase::Runtime
+        );
+    }
+
     // A cmdclass override is the classic install hook (Backstabber: install-time
     // execution). Its `run` is an Install root by name resolution, not by execution.
     #[test]

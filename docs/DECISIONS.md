@@ -404,6 +404,18 @@ without breaking "finding = path".
 - `PhaseMap` construction is its own task; it needs `setup.py` `cmdclass` recognition, which is
   itself a name-resolution problem (ADR-005).
 
+**Amended 2026-10-01: a function handed to a runner is called by the code that hands it.**
+Phase follows call edges, and `threading.Thread(target=payload).start()` in `setup.py` has
+none to `payload`: the payload was scored as runtime code although it runs during
+installation, and starting it in a thread is how an install hook avoids blocking `pip`. For a
+closed list of runners — `threading.Thread`, `threading.Timer`, `multiprocessing.Process`,
+`atexit.register`, `signal.signal`, `weakref.finalize`, `asyncio.to_thread`, and `submit`/`map`
+on a `concurrent.futures` executor (reachable through ADR-025) — the call graph adds an edge
+from the caller to the function argument (by its keyword, else its position), resolved like
+any callee; a lambda resolves to its own definition. Only the edge is added: arguments passed
+alongside (`args=(…)`) are not yet carried into the callback's parameters in the data-flow
+graph. The co-occurrence baselines (A, B) are unaffected, since they do not follow edges.
+
 ---
 
 ## ADR-009 — Evidence is a path
@@ -997,6 +1009,112 @@ stealer whose PHX-SAB-001 finding ("destructive operation on user data") came fr
 `path.split("/")` separators reaching a file removal: a right verdict for a wrong reason.
 What it shows is a different gap, recorded for the error analysis: no exfiltration rule
 fires on it, because the sensitive-file catalogue does not name browser profile stores.
+
+---
+
+## ADR-025 — A receiver bound once to a constructor call has that constructor's type
+
+**Date:** 2026-10-01. **Status:** accepted. Amends ADR-005 (a step between 3 and 5).
+Prompted by the first test-set run, which is being repeated; no constant was tuned on it.
+
+### Context
+
+ADR-005 resolves an attribute call on a value, `s.send(x)`, without knowing what `s` is:
+step 5 fans out to every package definition named `send` plus an external `<unknown>.send`,
+and with no such definition step 6 names the call by its text, `s.send`. Neither name is
+`socket.socket.send`, so every sink pattern written as *type.method* —
+`socket.socket.connect`, `socket.socket.send`, `socket.socket.sendall`,
+`pathlib.Path.unlink`, the `socket.socket.recv` source — could only match a call written on
+the module itself, which nobody writes. Measured on an inert fixture: an environment
+variable sent over a raw socket held in a variable produced **no finding at all**. The same
+holds for any client object whose methods are the egress: `smtplib.SMTP`, `ftplib.FTP`,
+`requests.Session`, `http.client.HTTPSConnection`.
+
+The fan-out has a second cost. A package that happens to define `connect` turned
+`s.connect(addr)` into an ambiguous call (and, until it was fixed the same day, hid the
+socket reading altogether). On benign code, the many `<any of N name>` hubs are where the
+long, ambiguous false-positive paths run.
+
+### Alternatives considered
+
+1. **Exclude module-level functions from step 5's candidates.** A plain `def connect()` is
+   reached as `x.connect` only when `x` is its module (already resolved by the alias table)
+   or when the function was stored on an object — monkeypatching, `SimpleNamespace`,
+   assignment in a class body. That last case is exactly an obfuscation shape, and dropping
+   it would turn a visible ambiguous edge into silence. It also does nothing for the dead
+   *type.method* patterns. Rejected.
+2. **Prefer a candidate in the same file.** Rejected: preferring any package candidate
+   discards the external reading, which is the defect this decision exists to avoid.
+3. **Type inference / points-to.** Still out of reach (ADR-005).
+4. **Type a name from its single constructor binding.** Chosen: the smallest piece of type
+   information that is exact without inference.
+
+### Choice
+
+A name is **typed** in a scope when that scope binds it exactly once, and that binding is
+`name = C(…)` or `with C(…) as name`, where `C` resolves (ADR-005 steps 1–3, 6) to:
+
+- a **package class** — the type is that class; or
+- an **external callable that constructs** — its last component starts with an upper-case
+  letter (`smtplib.SMTP`, `requests.Session`), or it is on a closed list of lower-case
+  constructors (`socket.socket`, `socket.create_connection`, `socket.socketpair`,
+  `socket.fromfd`, `ssl.wrap_socket`, `requests.session`, `urllib.request.build_opener`).
+
+Every other binding of the name in that scope — a second assignment, a parameter, a loop
+or `except` target, a tuple target, an import, a `def`/`class` of that name, a `global` or
+`nonlocal` declaration — leaves it untyped. A name not bound in the calling scope is looked
+up in the enclosing function scopes and then the module scope, as Python does (class bodies
+are skipped from inside a method); a `global` declaration of the name anywhere in the file
+leaves the module-level name untyped.
+
+Then `name.m(…)` on a typed name, `m` a single attribute, resolves as:
+
+- package class type: to the method `m` defined in the class body, `Resolved`; if the class
+  does not define `m` itself (inherited, possibly from an external base) — fall through to
+  step 5 unchanged;
+- external type `T`: to the external `T.m`, `Resolved`. No package candidates are added.
+
+Receivers bound by a parameter or by a function's return value, and chains longer than
+`self.attr.m`, stay untyped.
+
+**Attributes (same day).** A client kept on the instance — `self.sock = socket.socket()` in
+one method, `self.sock.send(x)` in another, often with `self.sock = None` in `__init__` and
+the constructor buried in a helper — is the common shape in practice, and the interpreter
+resolves `self.sock` from writes that are all in the source. `self.attr` read inside a
+method of class `K` is typed `T` when:
+
+- `K`'s own methods (any of them, nested helpers included) write `self.attr` at least once;
+- every write of `.attr` in the package — through `self` in `K`, or through any other object
+  anywhere, since a helper may receive the instance under another name — is a constructor
+  call of the same type `T`, or `None` (an initialiser: a method called on `None` fails, so a
+  call that runs sees one of the other writes);
+- `K` has no method and no class-body binding named `attr`, and no `setattr` writes `attr`;
+  a `setattr` whose name is not a literal leaves every attribute in the package untyped.
+
+Matching writes across objects by attribute name alone is deliberately pessimistic: an
+unrelated object whose `.attr` is assigned something else leaves both untyped. A write made
+by an external base class is not visible; if it disagreed, the type would be wrong for calls
+after it. Accepted: the package's own writes all agree, and the error analysis would show it.
+
+The data-flow side follows: `self.sock.connect(addr)` on a typed attribute writes `addr` into
+`self`, as `self.sock = v` already does (fields are not tracked), so the address of a reverse
+shell kept on the instance reaches `os.dup2(self.sock.fileno(), …)` in the same method.
+Untyped `x.y.write(…)` is left alone: tainting every object that has an attribute written to
+would spread taint far beyond what the source shows.
+
+### Consequences
+
+- *type.method* sink and source patterns become reachable: socket egress, `pathlib.Path`
+  removal, client-object egress through patterns that are already prefixes (`requests`,
+  `smtplib`, `ftplib`, `http.client`). Expected: recall up, and some benign packages gain
+  findings that are real (a `requests.Session` POST carrying a token); measured, not
+  assumed.
+- Typed calls no longer fan out, so fewer ambiguous hubs and shorter benign paths.
+- The confidence is `Resolved`: a single binding in the same scope is exact unless the
+  object's attribute is replaced at run time, which no reading of the source shows.
+- A constructor whose result is not an instance of its name (a capitalised factory function)
+  gives a wrong type name; the call then matches nothing it should not, because sink
+  patterns name real types. Accepted.
 
 ---
 

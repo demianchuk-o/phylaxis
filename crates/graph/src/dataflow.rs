@@ -738,13 +738,33 @@ impl Walker<'_> {
         }
 
         // A call into a package method is followed through its body (`self` is bound
-        // below); only an external one is summarised as a receiver write.
-        if package_targets.is_empty()
-            && method
+        // below); the external reading of the call is summarised as a receiver write.
+        // WHY both, not either: `s.connect(addr)` on an unknown receiver resolves to every
+        // package `def connect` *and* to `<unknown>.connect` (ADR-005 step 5). A same-named
+        // package function is a candidate, not proof that the socket reading is wrong, so it
+        // must add its edges beside the receiver write rather than suppress it. The write
+        // carries that external edge's confidence: Ambiguous when candidates exist.
+        let external = if package_targets.is_empty() {
+            Some(Confidence::Resolved)
+        } else {
+            targets
+                .iter()
+                .find(|(t, _)| self.calls.graph[*t].kind == CallNodeKind::External)
+                .map(|(_, c)| *c)
+        };
+        if let Some(confidence) = external.filter(|_| {
+            method
                 .as_deref()
                 .is_some_and(|m| RECEIVER_TAINTING_METHODS.contains(&m))
-        {
-            self.receiver_write(ast, callee, owner, &label, &all_actuals[receiver.len()..]);
+        }) {
+            self.receiver_write(
+                ast,
+                callee,
+                owner,
+                &label,
+                &all_actuals[receiver.len()..],
+                confidence,
+            );
         }
 
         if !package_targets.is_empty() {
@@ -770,10 +790,28 @@ impl Walker<'_> {
         owner: SymbolId,
         label: &str,
         arguments: &[(Span, NodeIndex)],
+        confidence: Confidence,
     ) {
-        let Some(object) = callee.and_then(|c| ast.child_by_field(c, "object")) else {
+        let Some(mut object) = callee.and_then(|c| ast.child_by_field(c, "object")) else {
             return;
         };
+        // `self.sock.connect(addr)` on a typed attribute (ADR-025): the write lands in
+        // `self`, the way `self.sock = v` taints `self` in `bind_target` (fields are not
+        // tracked). Typed means the call was renamed from its text to its type's method;
+        // an untyped `x.y.write(…)` is left alone, since tainting every object that has some
+        // attribute written to would spread taint far beyond what the source shows.
+        if ast.get(object).map(|n| n.kind) == Some(AstKind::Attribute) {
+            let callee_text = callee.and_then(|c| ast.text_of(c)).unwrap_or_default();
+            let typed = canonicalize(self.table, ast.file, callee_text).0 != label;
+            match ast.child_by_field(object, "object") {
+                Some(base)
+                    if typed && ast.get(base).map(|n| n.kind) == Some(AstKind::Identifier) =>
+                {
+                    object = base;
+                }
+                _ => return,
+            }
+        }
         if ast.get(object).map(|n| n.kind) != Some(AstKind::Identifier) {
             return;
         }
@@ -798,7 +836,7 @@ impl Walker<'_> {
                     obfuscating: false,
                 },
                 *s,
-                Confidence::Resolved,
+                confidence,
             );
         }
         self.receiver_writes
@@ -1494,6 +1532,50 @@ mod tests {
             "203.0.113.9",
             (FlowNodeKind::Definition, "fd")
         ));
+    }
+
+    // A package function that shares the method's name is one more candidate, not a
+    // replacement: `s.connect(addr)` still taints `s`. Without this, naming a helper
+    // `connect` hid a reverse shell. The write is Ambiguous when the receiver is untyped (a
+    // parameter here) and Resolved when a constructor binding types it (ADR-025).
+    #[test]
+    fn a_namesake_package_function_does_not_hide_the_receiver_write() {
+        for (src, confidence) in [
+            (
+                "import socket
+def connect(s):
+    s.connect(('203.0.113.9', 1))
+    fd = s.fileno()
+",
+                Confidence::Ambiguous,
+            ),
+            (
+                "import socket
+def connect():
+    s = socket.socket()
+    s.connect(('203.0.113.9', 1))
+    fd = s.fileno()
+",
+                Confidence::Resolved,
+            ),
+        ] {
+            let g = graph_from_sources(&[("pkg/a.py", src)]);
+            let d = &g.dfg.graph;
+            assert!(
+                reaches(d, "203.0.113.9", (FlowNodeKind::Definition, "fd")),
+                "{src}"
+            );
+            let write = d
+                .edge_indices()
+                .find(|e| {
+                    let (_, to) = d.edge_endpoints(*e).unwrap();
+                    d[to].kind == FlowNodeKind::Definition
+                        && d[to].label == "s"
+                        && matches!(d[*e].kind, FlowEdgeKind::Transform { .. })
+                })
+                .expect("receiver write into s");
+            assert_eq!(d[write].confidence, confidence, "{src}");
+        }
     }
 
     // The list is closed: a method not on it does not taint its receiver.

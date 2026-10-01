@@ -10,6 +10,7 @@ use phylaxis_core::{
 };
 
 use crate::error::GraphError;
+use crate::receivers::{ReceiverType, ReceiverTypes, build_receiver_types, constructs};
 use crate::symbols::{canonicalize, resolve_bare_name};
 
 /// The name of the single node that stands for every callee the resolver could not name at
@@ -63,6 +64,7 @@ fn collect_sites(
     ast: &Ast,
     table: &SymbolTable,
     definition_of_node: &BTreeMap<(FileId, AstNodeId), SymbolId>,
+    receivers: &ReceiverTypes,
     out: &mut Vec<CallSite>,
 ) -> Result<(), GraphError> {
     let module = *table
@@ -93,7 +95,7 @@ fn collect_sites(
         let callee_text = ast.text_of(callee).unwrap_or_default();
 
         let owner = enclosing_definition(ast, node.parent, definition_of_node).unwrap_or(module);
-        let resolution = resolve_call(ast, table, owner, callee, callee_text);
+        let resolution = resolve_call(ast, table, owner, callee, callee_text, receivers);
 
         let dynamic_dispatch = resolution == Resolution::Dynamic;
         let unknown_attribute = match (&resolution, callee_text.split_once('.')) {
@@ -103,6 +105,12 @@ fn collect_sites(
             _ => None,
         };
 
+        let runner = match &resolution {
+            Resolution::External(name) if node.kind == AstKind::Call => CALLBACK_RUNNERS
+                .iter()
+                .find(|(runner, _, _)| *runner == name.as_str()),
+            _ => None,
+        };
         out.push(CallSite {
             file: ast.file,
             owner,
@@ -112,8 +120,106 @@ fn collect_sites(
             dynamic_dispatch,
             unknown_attribute,
         });
+
+        // `Thread(target=f).start()`: the runner calls `f`, so the caller reaches it.
+        if let Some((_, keyword, position)) = runner
+            && let Some(site) = callback_site(
+                ast,
+                table,
+                owner,
+                id,
+                (keyword, *position),
+                definition_of_node,
+                receivers,
+            )
+        {
+            out.push(site);
+        }
     }
     Ok(())
+}
+
+/// APIs that run a function handed to them, and where that function is: the keyword, or
+/// else the position. Closed list; matched on the canonical callee, so
+/// `from threading import Thread` is covered.
+///
+/// WHY an edge for these: the phase of a definition is computed by following call edges
+/// from the phase roots (ADR-008). A payload started as `Thread(target=run)` from setup.py
+/// has no call edge from setup.py, so without this it would be scored as runtime code — and
+/// starting it in a thread is precisely how an install hook avoids blocking `pip`.
+const CALLBACK_RUNNERS: &[(&str, &str, usize)] = &[
+    ("threading.Thread", "target", 1),
+    ("threading.Timer", "function", 1),
+    ("multiprocessing.Process", "target", 1),
+    ("atexit.register", "func", 0),
+    ("signal.signal", "handler", 1),
+    ("weakref.finalize", "func", 1),
+    ("asyncio.to_thread", "func", 0),
+    ("concurrent.futures.ThreadPoolExecutor.submit", "fn", 0),
+    ("concurrent.futures.ProcessPoolExecutor.submit", "fn", 0),
+    ("concurrent.futures.ThreadPoolExecutor.map", "fn", 0),
+    ("concurrent.futures.ProcessPoolExecutor.map", "fn", 0),
+];
+
+/// The call site "`owner` calls the function passed to the runner at `call`", resolved like
+/// any callee: a name or `self.method` through ADR-005 (and ADR-025), a lambda to its own
+/// definition. `None` when the argument is absent or has no name to resolve.
+fn callback_site(
+    ast: &Ast,
+    table: &SymbolTable,
+    owner: SymbolId,
+    call: AstNodeId,
+    (keyword, position): (&str, usize),
+    definition_of_node: &BTreeMap<(FileId, AstNodeId), SymbolId>,
+    receivers: &ReceiverTypes,
+) -> Option<CallSite> {
+    let arguments = ast.child_by_field(call, "arguments")?;
+    let items = ast.get(arguments)?.children.clone();
+    let by_keyword = items.iter().copied().find(|i| {
+        ast.get(*i)
+            .is_some_and(|n| n.kind == AstKind::KeywordArgument)
+            && ast.child_by_field(*i, "name").and_then(|k| ast.text_of(k)) == Some(keyword)
+    });
+    let argument = match by_keyword {
+        Some(kw) => ast.child_by_field(kw, "value")?,
+        None => items
+            .iter()
+            .copied()
+            .filter(|i| {
+                ast.get(*i).is_some_and(|n| {
+                    n.kind != AstKind::KeywordArgument
+                        && !ast.text_of(*i).is_some_and(|t| t.starts_with('*'))
+                })
+            })
+            .nth(position)?,
+    };
+    let node = ast.get(argument)?;
+    let text = ast.text_of(argument)?;
+    let resolution = match node.kind {
+        AstKind::Lambda => Resolution::Definition(*definition_of_node.get(&(ast.file, argument))?),
+        AstKind::Identifier | AstKind::Attribute => {
+            match resolve_callee(table, ast.file, owner, text, receivers) {
+                Resolution::Dynamic => return None,
+                r => r,
+            }
+        }
+        _ => return None,
+    };
+    let unknown_attribute = match (&resolution, text.split_once('.')) {
+        (Resolution::Candidates(_), Some((_, rest))) => {
+            Some(rest.rsplit('.').next().unwrap_or(rest).to_owned())
+        }
+        _ => None,
+    };
+    Some(CallSite {
+        file: ast.file,
+        owner,
+        ast_node: argument,
+        span: node.span,
+        resolution,
+        dynamic_dispatch: false,
+        unknown_attribute,
+    })
 }
 
 /// The nearest ancestor that is a definition, by the same climb the symbol stage uses.
@@ -144,6 +250,7 @@ fn resolve_call(
     scope: SymbolId,
     callee: AstNodeId,
     callee_text: &str,
+    receivers: &ReceiverTypes,
 ) -> Resolution {
     if ast.get(callee).map(|n| n.kind) == Some(AstKind::Call) {
         let inner = ast
@@ -152,14 +259,14 @@ fn resolve_call(
             .unwrap_or_default();
         if inner == "getattr" {
             return match getattr_literal(ast, callee) {
-                Some(folded) => resolve_callee(table, ast.file, scope, &folded),
+                Some(folded) => resolve_callee(table, ast.file, scope, &folded, receivers),
                 None => Resolution::Dynamic,
             };
         }
         // Calling whatever another call returned. There is no name here at all.
         return Resolution::Dynamic;
     }
-    resolve_callee(table, ast.file, scope, callee_text)
+    resolve_callee(table, ast.file, scope, callee_text, receivers)
 }
 
 /// `getattr(os, "system")` → `os.system`, and `None` when the attribute is not a literal.
@@ -206,10 +313,25 @@ fn getattr_literal(ast: &Ast, call: AstNodeId) -> Option<String> {
 pub fn build_call_graph(asts: &[Ast], table: &mut SymbolTable) -> Result<CallGraph, GraphError> {
     let definition_of_node = index_definitions(table);
 
+    // Phase 0 — names bound once to a constructor call (ADR-025). The constructor itself
+    // is resolved without receiver types, so typing never depends on typing.
+    let untyped = ReceiverTypes::default();
+    let receivers = build_receiver_types(asts, table, &definition_of_node, |ast, scope, call| {
+        let callee = ast.child_by_field(call, "function")?;
+        let text = ast.text_of(callee)?;
+        match resolve_call(ast, table, scope, callee, text, &untyped) {
+            Resolution::Definition(s) if table.get(s)?.kind == SymbolKind::Class => {
+                Some(ReceiverType::Class(s))
+            }
+            Resolution::External(name) if constructs(&name) => Some(ReceiverType::External(name)),
+            _ => None,
+        }
+    });
+
     // Phase 1 — resolve every call site against the definitions-only table.
     let mut sites: Vec<CallSite> = Vec::new();
     for ast in asts {
-        collect_sites(ast, table, &definition_of_node, &mut sites)?;
+        collect_sites(ast, table, &definition_of_node, &receivers, &mut sites)?;
     }
 
     // Phase 2 — nodes, in canonical order.
@@ -469,6 +591,7 @@ pub fn resolve_callee(
     file: FileId,
     scope: SymbolId,
     callee: &str,
+    receivers: &ReceiverTypes,
 ) -> Resolution {
     let callee = callee.trim();
     if callee.is_empty() {
@@ -513,6 +636,33 @@ pub fn resolve_callee(
         return Resolution::Definition(symbol);
     }
 
+    // ADR-025 — a typed receiver: a name bound once to a constructor call (`s.m()`), or a
+    // `self.attr` every visible write agrees on (`self.attr.m()`, the only two-level chain
+    // that is typed). An external type names the call exactly; a package class does when it
+    // defines the method itself, and otherwise (inherited, perhaps from an external base)
+    // step 5 runs unchanged.
+    let typed = match rest.split_once('.') {
+        Some((attribute, method)) if head == "self" && !method.contains('.') => receivers
+            .attribute_type(table, scope, attribute)
+            .map(|t| (t, method)),
+        None if !binds_a_module(table, file, head) => {
+            receivers.type_of(table, scope, head).map(|t| (t, rest))
+        }
+        _ => None,
+    };
+    if let Some((ty, method)) = typed {
+        match ty {
+            ReceiverType::External(ty) => {
+                return Resolution::External(QualifiedName::new(format!("{ty}.{method}")));
+            }
+            ReceiverType::Class(class) => {
+                if let Some(target) = method_of_class(table, *class, method) {
+                    return Resolution::Definition(target);
+                }
+            }
+        }
+    }
+
     // Step 5 — an attribute call whose receiver is not a module this file imported is a
     // call on a value, and the value's type is exactly what is not known. Fan out to every
     // definition with that name rather than dropping the edge: a missing edge is silent, an
@@ -555,6 +705,20 @@ fn method_in_enclosing_class(table: &SymbolTable, scope: SymbolId, rest: &str) -
         current = symbol.scope;
     }
     None
+}
+
+/// The method `name` defined in the body of `class` itself (not inherited).
+fn method_of_class(table: &SymbolTable, class: SymbolId, name: &str) -> Option<SymbolId> {
+    table
+        .symbols
+        .iter()
+        .rev()
+        .find(|s| {
+            s.scope == Some(class)
+                && s.name == name
+                && matches!(s.kind, SymbolKind::Method | SymbolKind::Function)
+        })
+        .map(|s| s.id)
 }
 
 #[cfg(test)]
@@ -655,6 +819,125 @@ def again(obj):
     // ADR-005 step 5: an attribute call on an unknown receiver fans out to every
     // definition with that name, at Ambiguous confidence. A missing edge would be silent;
     // an ambiguous edge is visible and down-weighted (ADR-007).
+    #[test]
+    fn typed_receivers_resolve_exactly() {
+        // The targets of every call made from `pkg.a.<def>`, by name.
+        fn callees(cg: &CallGraph, from: &str) -> Vec<String> {
+            let from = node_named(cg, from);
+            let mut out: Vec<String> = cg
+                .graph
+                .edges(from)
+                .map(|e| {
+                    let to = petgraph::visit::EdgeRef::target(&e);
+                    format!("{} {:?}", cg.graph[to].name.as_str(), e.weight().confidence)
+                })
+                .collect();
+            out.sort();
+            out.dedup();
+            out
+        }
+        // A package `def send` and a package `class C` with `send` are namesakes only.
+        let decoys = "def send(x):\n    pass\nclass C:\n    def send(self, x):\n        pass\n";
+        let cases: &[(&str, &[&str])] = &[
+            // External constructor, in all three binding forms and from the module scope.
+            (
+                "def f(x):\n    s = socket.socket()\n    s.send(x)\n",
+                &["socket.socket Resolved", "socket.socket.send Resolved"],
+            ),
+            (
+                "def f(x):\n    with socket.create_connection(x) as s:\n        s.send(x)\n",
+                &[
+                    "socket.create_connection Resolved",
+                    "socket.create_connection.send Resolved",
+                ],
+            ),
+            (
+                "s = socket.socket()\ndef f(x):\n    s.send(x)\n",
+                &["socket.socket.send Resolved"],
+            ),
+            // A package class: its own method, not every `send`.
+            (
+                "def f(x):\n    c = C()\n    c.send(x)\n",
+                &["pkg.a.C Resolved", "pkg.a.C.send Resolved"],
+            ),
+        ];
+        for (body, expected) in cases {
+            let src = format!("import socket\n{decoys}{body}");
+            let (_, cg) = callgraph_from_sources(&[("pkg/a.py", &src)]);
+            assert_eq!(callees(&cg, "pkg.a.f"), *expected, "{body}");
+        }
+    }
+
+    // `self.attr` is typed from every write the package shows: a `None` initialiser in
+    // `__init__`, the constructor in a helper method, a write through another object. Any
+    // write that disagrees, or that the census cannot read, leaves it untyped.
+    #[test]
+    fn self_attributes_are_typed_from_every_visible_write() {
+        let class = "import socket\ndef send(x):\n    pass\n\
+                     class C:\n    def __init__(self):\n        self.link = None\n\
+                     \x20   def _open(self):\n        self.link = socket.socket()\n\
+                     \x20   def go(self, x):\n        self.link.send(x)\n";
+        let typed = |extra: &str| {
+            let src = format!("{class}{extra}");
+            let (_, cg) = callgraph_from_sources(&[("pkg/a.py", &src)]);
+            let go = node_named(&cg, "pkg.a.C.go");
+            let exact = cg
+                .graph
+                .node_indices()
+                .find(|i| cg.graph[*i].name.as_str() == "socket.socket.send");
+            let namesake = node_named(&cg, "pkg.a.send");
+            match exact {
+                Some(t) => {
+                    let e = cg.graph.edges_connecting(go, t).next().expect("edge");
+                    assert_eq!(e.weight().confidence, Confidence::Resolved);
+                    assert!(cg.graph.edges_connecting(go, namesake).next().is_none());
+                    true
+                }
+                None => {
+                    assert!(cg.graph.edges_connecting(go, namesake).next().is_some());
+                    false
+                }
+            }
+        };
+        assert!(typed(""));
+        assert!(typed("def helper(o):\n    o.link = socket.socket()\n"));
+        assert!(!typed("def helper(o, v):\n    o.link = v\n"));
+        assert!(!typed(
+            "def helper(o):\n    o.link = socket.create_connection(1)\n"
+        ));
+        assert!(!typed("def helper(o, n, v):\n    setattr(o, n, v)\n"));
+        assert!(!typed("def helper(o, v):\n    setattr(o, 'link', v)\n"));
+    }
+
+    // Anything that can rebind the name leaves it untyped, and step 5 runs as before.
+    #[test]
+    fn a_name_bound_twice_or_as_a_parameter_stays_untyped() {
+        for body in [
+            "def f(x):\n    s = socket.socket()\n    s = x\n    s.send(x)\n",
+            "def f(s, x):\n    s.send(x)\n",
+            "def f(x):\n    for s in x:\n        s.send(x)\n",
+            "def f(x):\n    s, t = socket.socket(), 1\n    s.send(x)\n",
+            "s = socket.socket()\ndef g():\n    global s\n    s = 1\ndef f(x):\n    s.send(x)\n",
+            // A shadowing local in the calling scope wins over the typed module name.
+            "s = socket.socket()\ndef f(x):\n    s = x\n    s.send(x)\n",
+        ] {
+            let src = format!("import socket\ndef send(x):\n    pass\n{body}");
+            let (_, cg) = callgraph_from_sources(&[("pkg/a.py", &src)]);
+            let f = node_named(&cg, "pkg.a.f");
+            let send = node_named(&cg, "pkg.a.send");
+            assert!(
+                cg.graph.edges_connecting(f, send).next().is_some(),
+                "untyped: the namesake stays a candidate\n{body}"
+            );
+            assert!(
+                !cg.graph
+                    .node_indices()
+                    .any(|i| cg.graph[i].name.as_str() == "socket.socket.send"),
+                "untyped: no exact name\n{body}"
+            );
+        }
+    }
+
     #[test]
     fn unknown_receiver_resolves_to_all_candidates_ambiguously() {
         let (_, cg) = callgraph_from_sources(&[(
