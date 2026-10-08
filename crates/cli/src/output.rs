@@ -65,6 +65,10 @@ pub fn to_text(report: &ScanReport) -> String {
             name(&f.confidence),
             f.message
         );
+        if f.evidence.path.conditional {
+            // ADR-030: the sink sits under an environment check (OS, host, user, time).
+            out.push_str("      conditional: runs only when an environment check passes\n");
+        }
         for step in &f.evidence.path.steps {
             let loc = &step.location;
             let _ = write!(

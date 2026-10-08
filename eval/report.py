@@ -289,7 +289,7 @@ def r5(runs: list[tuple[str, str]], manifest_doc: dict, bkc_doc: dict | None) ->
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--runs", nargs="*", default=["=ruleset 2", "-r4=ruleset 4"],
+    p.add_argument("--runs", nargs="*", default=["=ruleset 2", "-r5=ruleset 5"],
                    help="tag=label pairs; a run is reported only if its files exist")
     p.add_argument("--stdout", action="store_true", help="print instead of writing docs/RESULTS.md")
     args = p.parse_args()

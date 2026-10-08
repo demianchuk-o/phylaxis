@@ -221,6 +221,6 @@ source of truth; the tables below describe them.
 | Objective: financial gain (mining, wallet theft) | partially via EXF-002 (wallet files) and DRP-002 (miner binary); a dedicated wallet-address rule is deferred (phase 2, `PHX-FIN-001`, request in DECISIONS.md if needed) |
 | Execution: install | INS-001…003 plus phase weighting on every rule |
 | Execution: runtime (import / call) | phase weighting |
-| Execution: conditional | **not computed.** Paths carry a `conditional` attribute, but deciding it needs the `if` around the sink (an OS, hostname, environment or time check), which the package graph does not hold; it is always `false`. A conditional payload is still found — the guard does not cut the path — it is only not labelled as conditional. |
+| Execution: conditional | `conditional` on the path (ADR-030): set when the sink call sits inside an `if` — its `elif`s and `else` included — whose condition reads the OS, platform, hostname, user, environment variables, locale or time. A label, not a weight: the guard never cuts the path. Not seen: a guard in a *caller* (`if os.name == "nt": run()` with the payload inside `run`), or an early `return` guard. |
 | Obfuscation: encoding | OBF-001, OBF-002, `obfuscated` attribute |
 | Injection tree (typosquatting, account compromise, …) | **out of scope**: not observable from one sdist; stated in 1.5 |

@@ -18,7 +18,8 @@ use serde::Serialize;
 /// messenger webhooks as egress, regex matches and appended items carry taint.
 /// 4: ADR-029 — execution sinks match their first argument only; PHX-DRP-002 requires the
 /// path to pass through a file write.
-pub const RULESET_VERSION: RulesetVersion = RulesetVersion(4);
+/// 5: ADR-030 — `conditional` set on paths whose sink sits under an environment guard.
+pub const RULESET_VERSION: RulesetVersion = RulesetVersion(5);
 
 // ── Source patterns (ADR-006) ─────────────────────────────────────────────────────────
 // Canonical dotted prefixes after import aliasing. `SensitiveFile` patterns are path

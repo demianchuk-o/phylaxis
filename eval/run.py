@@ -109,6 +109,8 @@ def scan_entry(entry: dict, mode: str) -> dict:
             skipped=report.get("skipped"),
             rules=sorted({f["rule"] for f in report["findings"]}),
             findings=len(report["findings"]),
+            # ADR-030: findings whose sink sits under an environment guard.
+            conditional=sum(bool(f["evidence"]["path"].get("conditional")) for f in report["findings"]),
             **finding_summary(report["findings"]),
         )
     return row

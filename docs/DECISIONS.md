@@ -1336,7 +1336,7 @@ per-rule table of RESULTS.md (R3):
    one path whose joint step reads "written to a file". Searching the legs separately matters:
    the single shortest path may skip the write even when a path through it exists. The engine
    selects it by rule id, as it does for PHX-INS-003.
-3. **`conditional` is reported as not computed.** RULES.md's coverage table claimed it on every
+3. *(superseded the same day by ADR-030, which computes it)* **`conditional` is reported as not computed.** RULES.md's coverage table claimed it on every
    path; it is always `false`, because deciding it needs the `if` around the sink, which the
    package graph does not hold. A conditional payload is still found — the guard does not cut
    the path — it is only not labelled. Implementing it is further work.
@@ -1357,6 +1357,43 @@ rule's findings off another (DRP-002), so they move precision, not recall, excep
 alone flagged a package that wrote nothing. Like ADR-028 they were found on test-set output,
 so ruleset 4's test-set numbers are post-hoc beside ruleset 2's, and the Backstabber split's
 `new` subset remains the honest measurement.
+
+---
+
+## ADR-030 — Conditional execution is a label computed from environment guards
+
+**Date:** 2026-10-09. **Status:** accepted. Supersedes ADR-029 point 3; implements ADR-008's
+`conditional` attribute.
+
+### Context
+
+Backstabber's execution tree has a conditional branch: payloads that run only on a given OS,
+host, user or date. ADR-008 made it an attribute of the path, not a phase; nothing set it.
+
+### Choice
+
+- While walking statements, an `if` whose condition mentions a name under `platform`,
+  `sys.platform`, `os.name`, `os.environ`, `os.getenv`, `os.uname`, `os.getlogin`,
+  `socket.gethostname`, `getpass`, `locale`, `datetime` or `time` — after import aliases are
+  resolved — is a guard for its whole statement, `elif`s and `else` included. Sink-candidate
+  nodes created under a guard go into `DataFlowGraph::conditional`, and a data path ending at
+  one has `conditional: true`. The text report prints it; the JSON report always carried it.
+- **A label, not a weight.** The score is unchanged: ADR-010's constants were fixed before any
+  data, and a guard says *when* a payload runs, not whether it is malicious. A test pins that the
+  guarded and unguarded twins score the same.
+
+### Alternatives considered
+
+- **Leave it uncomputed** (ADR-029 point 3). Rejected: about an hour of work, and the taxonomy
+  dimension is one the method claims to cover.
+- **Follow guards across calls** (`if os.name == "nt": run()` with the payload in `run`).
+  Deferred: it needs the guard to travel along call edges, and a function called from both a
+  guarded and an unguarded site has no single answer.
+
+### Consequences
+
+`RULESET_VERSION` 4 → 5: the report changes for the same input, so the cache key must. No
+verdict, risk or finding set changes.
 
 ---
 

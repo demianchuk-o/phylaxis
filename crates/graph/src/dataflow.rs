@@ -271,6 +271,7 @@ pub fn build_data_flow(
         package_calls: Vec::new(),
         opened_from: BTreeMap::new(),
         receiver_writes: Vec::new(),
+        guards: 0,
     };
 
     for ast in asts {
@@ -343,7 +344,28 @@ struct Walker<'a> {
     /// `(scope, handle) → opens`: `fh` was bound from `open(…)` in `scope`.
     opened_from: BTreeMap<(SymbolId, String), Vec<Opened>>,
     receiver_writes: Vec<PendingReceiverWrite>,
+    /// How many enclosing `if`s test the environment (ADR-030).
+    guards: usize,
 }
+
+/// What an environment guard reads (ADR-030): a condition that mentions any of these, after
+/// import aliases are resolved, makes the `if` (its `elif`s and `else` included) a
+/// conditional-execution guard. The Backstabber paper's examples are an OS, a hostname, an
+/// environment variable and a date; user and locale checks are the same kind of fingerprint.
+const GUARD_NAMES: &[&str] = &[
+    "platform",
+    "sys.platform",
+    "os.name",
+    "os.environ",
+    "os.getenv",
+    "os.uname",
+    "os.getlogin",
+    "socket.gethostname",
+    "getpass",
+    "locale",
+    "datetime",
+    "time",
+];
 
 impl Walker<'_> {
     fn node(
@@ -389,6 +411,35 @@ impl Walker<'_> {
     /// Statements: binds names, and evaluates every expression it meets so that calls
     /// inside them get their nodes. `owner` is the definition whose body this is.
     fn visit(&mut self, ast: &Ast, id: AstNodeId, owner: SymbolId, depth: usize) {
+        let guard = ast.get(id).is_some_and(|n| n.kind == AstKind::If)
+            && ast
+                .child_by_field(id, "condition")
+                .is_some_and(|c| self.reads_environment(ast, c));
+        self.guards += usize::from(guard);
+        self.visit_statement(ast, id, owner, depth);
+        self.guards -= usize::from(guard);
+    }
+
+    /// Whether an `if` condition reads the environment: any name in it, canonicalised
+    /// through the file's imports, is under one of [`GUARD_NAMES`].
+    fn reads_environment(&self, ast: &Ast, condition: AstNodeId) -> bool {
+        let mut stack = vec![condition];
+        while let Some(n) = stack.pop() {
+            let Some(node) = ast.get(n) else { continue };
+            if matches!(node.kind, AstKind::Attribute | AstKind::Identifier)
+                && let Some(text) = ast.text_of(n)
+            {
+                let name = canonicalize(self.table, ast.file, text);
+                if GUARD_NAMES.iter().any(|g| name.is_under(g)) {
+                    return true;
+                }
+            }
+            stack.extend(node.children.iter().copied());
+        }
+        false
+    }
+
+    fn visit_statement(&mut self, ast: &Ast, id: AstNodeId, owner: SymbolId, depth: usize) {
         if depth > MAX_NESTING {
             return;
         }
@@ -762,6 +813,9 @@ impl Walker<'_> {
                             for (s, a) in &all_actuals {
                                 self.edge(*a, formal, FlowEdgeKind::Argument, *s, *confidence);
                             }
+                            if self.guards > 0 {
+                                self.dfg.conditional.insert(formal);
+                            }
                             // Argument 0 alone, for sinks that execute only it (ADR-029).
                             if let Some((s, first)) = positional.first() {
                                 let first_formal = self.node(
@@ -782,6 +836,9 @@ impl Walker<'_> {
                                     );
                                 }
                                 self.dfg.first_argument.insert(formal, first_formal);
+                                if self.guards > 0 {
+                                    self.dfg.conditional.insert(first_formal);
+                                }
                             }
                         }
                     }

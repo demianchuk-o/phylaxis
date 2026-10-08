@@ -674,9 +674,9 @@ pub fn find_sinks(pg: &PackageGraph, patterns: &[SinkPattern]) -> Vec<TaintSink>
 /// path's `confidence` is the minimum edge confidence, and `obfuscated` is set if any
 /// `Transform { obfuscating: true }` edge was crossed.
 ///
-/// `conditional` is always `false` for now: deciding it needs the syntax around the sink
-/// (`if platform.system() == …`), which the package graph does not carry. It is a severity
-/// attribute, not part of the predicate, so its absence moves no path in or out.
+/// `conditional` is set when the sink call sits inside an `if` that tests the environment
+/// (`DataFlowGraph::conditional`, ADR-030). It is a label, not part of the predicate: the
+/// guard never cuts the path, so a conditional payload is found either way.
 ///
 /// At most one path per pair is emitted, whatever `max_paths_per_pair` says.
 pub fn data_paths(
@@ -964,7 +964,7 @@ fn data_path(
         steps,
         confidence,
         obfuscated,
-        conditional: false,
+        conditional: pg.dfg.conditional.contains(&sink.node),
     }
 }
 
@@ -1029,7 +1029,7 @@ pub fn data_paths_via(
                     steps,
                     confidence: lead.confidence.min(tail.confidence),
                     obfuscated: lead.obfuscated || tail.obfuscated,
-                    conditional: false,
+                    conditional: lead.conditional || tail.conditional,
                 },
             );
         }
