@@ -593,15 +593,19 @@ fn home_or_root(value: &str) -> bool {
 /// all of the call's arguments and its receiver flow (see `dataflow::build_data_flow`).
 /// `definition` is the call-graph node of the definition containing the call.
 ///
-/// `SinkPattern::arg` is not yet honoured: every argument counts. That errs toward a
-/// finding, as ADR-007 asks of the graph; narrowing it needs one parameter node per
-/// argument position.
+/// `SinkPattern::arg = Some(0)` (ADR-029) moves the sink to the node only the first
+/// positional argument flows into (`DataFlowGraph::first_argument`): `subprocess.run(cmd,
+/// env=secrets)` executes `cmd`, not the environment it is given. Without a positional
+/// argument the pattern keeps every argument, which errs toward a finding as ADR-007 asks.
 pub fn find_sinks(pg: &PackageGraph, patterns: &[SinkPattern]) -> Vec<TaintSink> {
     let d = &pg.dfg.graph;
     let mut out = Vec::new();
+    // First-argument nodes are reached through their call's formal node, never on their own.
+    let first_only: std::collections::BTreeSet<NodeIndex> =
+        pg.dfg.first_argument.values().copied().collect();
     for i in d.node_indices() {
         let n = &d[i];
-        if n.kind != FlowNodeKind::Parameter {
+        if n.kind != FlowNodeKind::Parameter || first_only.contains(&i) {
             continue;
         }
         // A package function's parameters carry no symbol; only the external stand-ins do.
@@ -618,11 +622,18 @@ pub fn find_sinks(pg: &PackageGraph, patterns: &[SinkPattern]) -> Vec<TaintSink>
             .iter()
             .filter(|p| callee.qualified.is_under(p.pattern))
         {
+            // ADR-029: a pattern naming argument 0 ends at the node only that argument
+            // flows into. Only position 0 is ever declared; a call without a positional
+            // argument (`run(args=cmd)`, `exec(*parts)`) keeps all of them.
+            let node = match p.arg {
+                Some(0) => pg.dfg.first_argument.get(&i).copied().unwrap_or(i),
+                _ => i,
+            };
             out.push(TaintSink {
                 kind: p.kind,
                 pattern: QualifiedName::new(p.pattern),
                 location: location(pg, n.file, n.span),
-                node: i,
+                node,
                 definition,
             });
         }
@@ -955,6 +966,75 @@ fn data_path(
         obfuscated,
         conditional: false,
     }
+}
+
+/// Data reachability that must pass through one of `via` (ADR-029): source → a `via` node,
+/// then that node → sink, joined into one path. The shortest path from a source to a sink
+/// may skip every `via` node even when a path through one exists, so the two legs are
+/// searched separately rather than filtering the one-leg result. The joint step keeps the
+/// `via` node's location and reads `detail: "written to a file"`.
+///
+/// One path per sink, in sink order: the first `via` node (in `via` order) whose leg reaches
+/// it, preceded by the first source path that reaches that node.
+pub fn data_paths_via(
+    pg: &PackageGraph,
+    sources: &[TaintSource],
+    via: &[NodeIndex],
+    sinks: &[TaintSink],
+    limits: &ReachLimits,
+) -> Vec<(ReachabilityPath, usize)> {
+    let d = &pg.dfg.graph;
+    let stops: Vec<TaintSink> = via
+        .iter()
+        .filter_map(|&w| {
+            let n = d.node_weight(w)?;
+            Some(TaintSink {
+                kind: TaintSinkKind::PersistenceWrite,
+                pattern: QualifiedName::new("<file-write>"),
+                location: location(pg, n.file, n.span),
+                node: w,
+                definition: pg.call_graph.node_of(n.owner)?,
+            })
+        })
+        .collect();
+    let mut first_leg: std::collections::BTreeMap<usize, ReachabilityPath> = Default::default();
+    for (path, i) in data_paths_to(pg, sources, &stops, limits) {
+        first_leg.entry(i).or_insert(path);
+    }
+    let mut out: std::collections::BTreeMap<usize, ReachabilityPath> = Default::default();
+    for (&stop, lead) in &first_leg {
+        let from = TaintSource {
+            kind: TaintSourceKind::NetworkResponse,
+            pattern: QualifiedName::new("<file-write>"),
+            location: stops[stop].location.clone(),
+            node: stops[stop].node,
+        };
+        for (tail, sink) in data_paths_to(pg, std::slice::from_ref(&from), sinks, limits) {
+            if out.contains_key(&sink) || lead.steps.is_empty() || tail.steps.is_empty() {
+                continue;
+            }
+            let mut steps = lead.steps[..lead.steps.len() - 1].to_vec();
+            let joint = &tail.steps[0];
+            steps.push(PathStep {
+                kind: PathStepKind::Transfer,
+                location: joint.location.clone(),
+                symbol: joint.symbol.clone(),
+                detail: Some("written to a file".to_owned()),
+            });
+            steps.extend(tail.steps[1..].iter().cloned());
+            out.insert(
+                sink,
+                ReachabilityPath {
+                    kind: ReachabilityKind::Data,
+                    steps,
+                    confidence: lead.confidence.min(tail.confidence),
+                    obfuscated: lead.obfuscated || tail.obfuscated,
+                    conditional: false,
+                },
+            );
+        }
+    }
+    out.into_iter().map(|(sink, path)| (path, sink)).collect()
 }
 
 fn location(pg: &PackageGraph, file: FileId, span: Span) -> Location {

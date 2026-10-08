@@ -1302,6 +1302,64 @@ set measures it.
 
 ---
 
+## ADR-029 — Execution sinks execute their first argument; DRP-002 needs its write (ruleset 4)
+
+**Date:** 2026-10-09. **Status:** accepted. Closes open request "T-09 item 2" (`SinkPattern::arg`);
+corrects RULES.md's claim about `conditional`.
+
+### Context
+
+Two parts of the catalogue said more than the code did, both found while building the
+per-rule table of RESULTS.md (R3):
+
+- Every code-execution sink — `exec`, `eval`, `compile`, `subprocess`, `os.system`,
+  `os.popen`, `os.startfile`, `pty.spawn`, `marshal.loads`, `pickle.loads` — declares
+  `arg: Some(0)`: what is executed is the first argument. The data-flow graph gave each
+  external call one parameter node that *every* argument flows into, so
+  `subprocess.run(["git", "status"], env={"PROXY": "https://…"})` read as "an endpoint
+  executed". The open request recorded it as erring toward a finding, which is true, and also
+  a false-positive source on the headline metric.
+- PHX-DRP-001 and PHX-DRP-002 were the same predicate in code (`NetworkResponse` →
+  `CodeExecution`, data, same objective), so they always fired together and R3 showed two
+  identical rows. RULES.md specifies DRP-002 as "`NetworkResponse` → (`FileWrite` as a
+  transform) → `CodeExecution`": the write was in the specification and not in the engine.
+
+### Choice
+
+1. **First-argument nodes.** An external call with at least one positional argument gets a
+   second parameter node that only argument 0 flows into (`DataFlowGraph::first_argument`). A
+   sink pattern declaring `arg: Some(0)` ends there. A call with no positional argument
+   (`run(args=cmd)`, `exec(*parts)`) has none, and the pattern keeps all arguments: narrowing
+   never turns into silence.
+2. **DRP-002 is searched in two legs** (`reach::data_paths_via`): network response → a file
+   write (the writes ADR-006 already records), then that write → code execution, joined into
+   one path whose joint step reads "written to a file". Searching the legs separately matters:
+   the single shortest path may skip the write even when a path through it exists. The engine
+   selects it by rule id, as it does for PHX-INS-003.
+3. **`conditional` is reported as not computed.** RULES.md's coverage table claimed it on every
+   path; it is always `false`, because deciding it needs the `if` around the sink, which the
+   package graph does not hold. A conditional payload is still found — the guard does not cut
+   the path — it is only not labelled. Implementing it is further work.
+
+### Alternatives considered
+
+- **One parameter node per argument position.** More general, and twice the nodes on large
+  packages for a position nothing but 0 is ever declared for. Rejected until a rule needs it.
+- **Merge DRP-002 into DRP-001** (14 rules). Rejected: download-write-execute is a distinct,
+  common dropper shape in the corpus, and the specification already distinguishes it.
+- **Filter DRP-001's paths for one that crosses a write.** Rejected for the shortest-path
+  reason above.
+
+### Consequences
+
+`RULESET_VERSION` 3 → 4. Both changes can only remove findings (sink arguments) or split one
+rule's findings off another (DRP-002), so they move precision, not recall, except where DRP-002
+alone flagged a package that wrote nothing. Like ADR-028 they were found on test-set output,
+so ruleset 4's test-set numbers are post-hoc beside ruleset 2's, and the Backstabber split's
+`new` subset remains the honest measurement.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
@@ -1333,7 +1391,7 @@ was applied meanwhile.
      (a URL, raw IP, shell one-liner or wallet address) match nothing. The literal's value
      is already in the graph — a `Literal` node's label is its unquoted value — so what is
      missing is the matching, which belongs with the rule catalogue (T-11).
-  2. **`SinkPattern::arg`.** A sink call has one external-parameter node that every
+  2. *(closed 2026-10-09 by ADR-029)* **`SinkPattern::arg`.** A sink call has one external-parameter node that every
      argument flows into, so a path into *any* argument counts. Narrowing it needs one such
      node per argument position.
   3. **`ReachabilityPath::conditional`.** Always `false`: deciding it needs the `if` around

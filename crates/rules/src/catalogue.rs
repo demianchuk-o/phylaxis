@@ -16,7 +16,9 @@ use serde::Serialize;
 /// 3: ADR-028 — `chr` and escape-encoded literals as decoded literals, URLs inside command
 /// strings and f-string text visible to DRP-003 (URL templates only inside a command),
 /// messenger webhooks as egress, regex matches and appended items carry taint.
-pub const RULESET_VERSION: RulesetVersion = RulesetVersion(3);
+/// 4: ADR-029 — execution sinks match their first argument only; PHX-DRP-002 requires the
+/// path to pass through a file write.
+pub const RULESET_VERSION: RulesetVersion = RulesetVersion(4);
 
 // ── Source patterns (ADR-006) ─────────────────────────────────────────────────────────
 // Canonical dotted prefixes after import aliasing. `SensitiveFile` patterns are path

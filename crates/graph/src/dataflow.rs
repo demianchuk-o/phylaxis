@@ -762,6 +762,27 @@ impl Walker<'_> {
                             for (s, a) in &all_actuals {
                                 self.edge(*a, formal, FlowEdgeKind::Argument, *s, *confidence);
                             }
+                            // Argument 0 alone, for sinks that execute only it (ADR-029).
+                            if let Some((s, first)) = positional.first() {
+                                let first_formal = self.node(
+                                    ast,
+                                    id,
+                                    FlowNodeKind::Parameter,
+                                    owner,
+                                    Some(symbol),
+                                    name.0.clone(),
+                                );
+                                for a in first {
+                                    self.edge(
+                                        *a,
+                                        first_formal,
+                                        FlowEdgeKind::Argument,
+                                        *s,
+                                        *confidence,
+                                    );
+                                }
+                                self.dfg.first_argument.insert(formal, first_formal);
+                            }
                         }
                     }
                 }

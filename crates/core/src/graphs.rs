@@ -169,6 +169,12 @@ pub struct DataFlowGraph {
     /// creates, and the `open(…)` call result `fh` was bound from. Where the file is comes
     /// from what flows into `open`; persistence sinks are matched on that (ADR-006).
     pub file_writes: Vec<(NodeIndex, NodeIndex)>,
+    /// For an external call's formal-parameter node (every argument flows into it), the
+    /// node only its first positional argument flows into. A sink pattern that names
+    /// argument 0 (`exec`, `subprocess.run`: the code or the command) matches the second;
+    /// a call with no positional argument has no entry, and such a pattern falls back to
+    /// all arguments rather than to silence (ADR-029).
+    pub first_argument: BTreeMap<NodeIndex, NodeIndex>,
 }
 
 /// [8] Everything the rule engine queries for one distribution.

