@@ -1118,6 +1118,56 @@ would spread taint far beyond what the source shows.
 
 ---
 
+## ADR-026 — The Backstabber subset is a separate split, run once, after the test set
+
+**Date:** 2026-10-08. **Status:** accepted. Amends EVALUATION.md §2–3 before any BKC run.
+
+### Context
+
+EVALUATION.md §2 labels as malicious anything in the Datadog set *or* the Backstabber's Knife
+Collection PyPI subset (Ohm et al., 2020). Only Datadog was available when the split was drawn
+(ADR-023), and the test set has since been run in every configuration. The Backstabber
+samples, release `199bb667` (published 2026-08-12), arrived afterwards: 6 406 PyPI versions,
+mostly the original sdist files, which PyPI no longer serves.
+
+### Alternatives considered
+
+1. **Rebuild the manifest with both datasets and redraw the split.** Rejected: the development
+   set would change after rules were checked on it, and the test set would change after it was
+   run. Both break §3.
+2. **Append the new samples to the test set.** Rejected: the test-set numbers already reported
+   would silently become a different population.
+3. **A third split, `bkc`, run once per configuration under the same build.** Chosen.
+
+### Choice
+
+- Every counted BKC entry goes to split `bkc`; the development set is not redrawn. The
+  manifest is `<data>/bkc-manifest.json`, built by `eval/manifest_bkc.py`, kept with the
+  dataset rather than committed.
+- The unit is the one §2 first defined: one `.tar.gz`, identified by the sha256 of the file,
+  scanned as an archive. Wheel-only versions are excluded (invariant 2) and counted.
+- Each entry carries its **overlap** with the main manifest, by the ADR-023 content id
+  computed in memory over the archive, else by name and version: `new`, or `datadog-<split>`.
+  The headline BKC number is over `new`; the rest is reported beside it. Entries whose
+  content is in the development set are reported, never used for a claim.
+- Same wheel, ruleset and thresholds as the test run (commit `24692d2`, ruleset 2). Baseline:
+  GuardDog 3.2.0. Aura is optional on this split.
+- **The BKC phylaxis results are not looked at until the next ruleset is frozen.** Rule gaps
+  found by the error analysis of the test set may be closed before then; any such change is
+  post-hoc on the test set, and BKC's `new` subset, unseen by every version of the rules, is
+  where it is measured honestly.
+- The index's annotations (`trigger`, `locationOfMaliciousSnippet`, `objective`) are copied
+  into the entry where present. They cover a few hundred entries and support a secondary
+  comparison of phase and location, not the headline.
+
+### Consequences
+
+Recall gains a second, independent malicious population with original archives, which also
+exercises safe extraction on attacker-published inputs. There is no benign side to this
+split, so it measures recall only; precision stays the test set's.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading

@@ -141,13 +141,15 @@ def versions() -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--split", choices=["dev", "test"], default="dev")
+    p.add_argument("--split", choices=["dev", "test", "bkc"], default="dev")
     p.add_argument("--tool", choices=["guarddog", "aura", "both"], default="both")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     p.add_argument("--timeout", type=float, default=300.0)
     args = p.parse_args()
 
-    entries = [e for e in json.loads((HERE / "manifest.json").read_text(encoding="utf-8"))["entries"] if e.get("split") == args.split]
+    # ADR-026: the Backstabber split has its own manifest, kept with the dataset.
+    manifest = DATA / "bkc-manifest.json" if args.split == "bkc" else HERE / "manifest.json"
+    entries = [e for e in json.loads(manifest.read_text(encoding="utf-8"))["entries"] if e.get("split") == args.split]
     # Without a reachable daemon every Aura row fails in a second, and a finished file of error
     # rows is then skipped by every resume. Stop before writing anything instead.
     if args.tool in ("aura", "both") and subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
