@@ -94,12 +94,32 @@ fn ruleset_version() -> u32 {
     phylaxis_cli::ruleset_version()
 }
 
+/// `project_json(dir, options_json) -> str`: the ranked dependency-set report of
+/// `phylaxis project` (ADR-027) for every sdist directly inside `dir`. The scan mode is
+/// always the full method; `options_json` supplies `jobs` and `cache_path`.
+#[pyfunction]
+fn project_json(py: Python<'_>, dir: String, options_json: String) -> PyResult<String> {
+    let opts = parse_options(&options_json)?;
+    let opts = phylaxis_core::ScanOptions {
+        jobs: opts.jobs,
+        cache_path: opts.cache_path,
+        ..Default::default()
+    };
+    let report = py.detach(|| {
+        phylaxis_cli::project::sdists_in(Path::new(&dir))
+            .map(|paths| phylaxis_cli::project_report(&paths, &opts))
+    });
+    let report = report.map_err(|e| PyRuntimeError::new_err(format!("{dir}: {e}")))?;
+    serde_json::to_string(&report).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(cli_main, m)?)?;
     m.add_function(wrap_pyfunction!(scan_json, m)?)?;
     m.add_function(wrap_pyfunction!(scan_many_json, m)?)?;
+    m.add_function(wrap_pyfunction!(project_json, m)?)?;
     m.add_function(wrap_pyfunction!(rules_json, m)?)?;
     m.add_function(wrap_pyfunction!(ruleset_version, m)?)?;
     Ok(())

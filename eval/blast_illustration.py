@@ -114,7 +114,7 @@ def report(top: int, show: list[str], head: int) -> None:
           f"dependencies fetched {doc.get('fetched')}; {known} with metadata)")
     print(f"{'project':32s} {'rank':>6s} {'direct':>7s} {'transitive':>10s} {'share':>7s}")
     by_name = {r[0]: r for r in rows}
-    for r in rows[:head] + [by_name[norm(s)] for s in show if norm(s) in by_name]:
+    for r in rows[:head] + [by_name[norm(s)] for s in show if norm(s) in by_name and by_name[norm(s)] not in rows[:head]]:
         print(f"{r[0]:32s} {r[1]:6d} {r[2]:7d} {r[3]:10d} {r[3] / (top - 1):7.2%}")
     for s in show:
         if norm(s) not in by_name:

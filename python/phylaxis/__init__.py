@@ -25,9 +25,9 @@ import json
 import os
 from typing import Any, Iterable, Optional, Union
 
-from ._native import cli_main, rules_json, ruleset_version, scan_json, scan_many_json, version
+from ._native import cli_main, project_json, rules_json, ruleset_version, scan_json, scan_many_json, version
 
-__all__ = ["scan", "scan_many", "rules", "ruleset_version", "version", "cli_main", "__version__"]
+__all__ = ["scan", "scan_many", "project", "rules", "ruleset_version", "version", "cli_main", "__version__"]
 
 __version__ = version()
 
@@ -72,6 +72,13 @@ def scan_many(paths: Iterable[PathLike], *, mode: str = "D", min_confidence: Opt
     Results are in input order; an input that could not be scanned yields
     ``{"error": "..."}`` instead of raising, so one bad archive never aborts a run."""
     return json.loads(scan_many_json([os.fspath(p) for p in paths], _options(mode, min_confidence, jobs, cache)))
+
+
+def project(directory: PathLike, *, jobs: Optional[int] = None, cache: Optional[PathLike] = None) -> dict[str, Any]:
+    """Scan a project's dependency set, given as a directory of sdists, and rank what is
+    flagged by its blast radius in that set (``phylaxis project``). Always the full method.
+    Dependencies come from each sdist's ``PKG-INFO``; nothing is resolved or executed."""
+    return json.loads(project_json(os.fspath(directory), _options("D", None, jobs, cache)))
 
 
 def rules() -> list[dict[str, Any]]:
