@@ -1168,6 +1168,39 @@ split, so it measures recall only; precision stays the test set's.
 
 ---
 
+## ADR-027 — Blast radius is computed over the scanned project's dependency tree
+
+**Date:** 2026-10-08. **Status:** accepted. Scopes T-17 (`DependencyGraph`, `BlastRadius`).
+
+### Context
+
+The prioritisation tier ranks confirmed findings by how much depends on the flagged package.
+"How much" needs a dependency graph, and the choice of graph decides the size of the job: all
+of PyPI is a metadata dump of hundreds of thousands of projects; one project's dependencies
+are a few dozen to a few hundred packages.
+
+### Alternatives considered
+
+1. **The whole PyPI graph.** Rejected as the method: it needs an external metadata dump that
+   ages daily, and it answers a registry operator's question rather than a user's.
+2. **No graph; report findings unranked.** Rejected: a finding in a package forty other
+   packages of the project import is not the same problem as one in a leaf.
+3. **The scanned project's own dependency tree.** Chosen.
+
+### Choice
+
+- Input is a project's resolved requirements. The tree is built from each package's declared
+  dependencies; every package in it is scanned; `BlastRadius` of a flagged package counts the
+  packages of that tree that depend on it transitively, with its share of the tree and its
+  centrality.
+- An **ecosystem illustration** over the dependency metadata of the top-N PyPI projects
+  (the evaluation's `top-pypi-packages` snapshot) is computed once, for reporting, and is not
+  part of the tool.
+- Ranking orders findings; it never adds or removes one, so it has no precision or recall of
+  its own.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
