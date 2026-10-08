@@ -23,6 +23,9 @@ pub struct Cli {
 pub enum Command {
     /// Scan one or more sdists (`.tar.gz`) or extracted directories.
     Scan(ScanArgs),
+    /// Scan a project's dependency set (a directory of sdists) and rank flagged packages
+    /// by their blast radius in it (ADR-027).
+    Project(ProjectArgs),
     /// Print the rule catalogue.
     Rules {
         #[arg(long)]
@@ -123,6 +126,34 @@ impl ScanArgs {
             jobs: self.jobs,
             cache_path: self.cache.clone(),
             extract: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ProjectArgs {
+    /// Directory holding the project's dependency set as sdists (`.tar.gz`).
+    pub dir: PathBuf,
+
+    #[arg(long, value_enum, default_value_t = Format::Json)]
+    pub format: Format,
+
+    /// Worker threads for batch scanning (default: all cores).
+    #[arg(long)]
+    pub jobs: Option<usize>,
+
+    /// Path of the result cache (redb file). Omit to disable caching.
+    #[arg(long)]
+    pub cache: Option<PathBuf>,
+}
+
+impl ProjectArgs {
+    /// Always the full method: ranking is a product feature, not an ablation.
+    pub fn options(&self) -> ScanOptions {
+        ScanOptions {
+            jobs: self.jobs,
+            cache_path: self.cache.clone(),
+            ..Default::default()
         }
     }
 }

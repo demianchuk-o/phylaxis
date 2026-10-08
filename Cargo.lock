@@ -970,6 +970,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
  "insta",
  "phylaxis-cache",
  "phylaxis-core",
@@ -980,6 +981,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "tar",
  "thiserror",
  "tracing",
  "tracing-subscriber",

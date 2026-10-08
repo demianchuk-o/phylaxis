@@ -18,7 +18,8 @@ pub mod python;
 pub use digest::{sha256_of_bytes, sha256_of_file};
 pub use error::ParseError;
 pub use extract::{
-    EntryKind, ExtractedTree, ManifestEntry, extract_sdist, load_directory, validate_entry,
+    EntryKind, ExtractedTree, ManifestEntry, SdistMetadata, extract_sdist, load_directory,
+    read_sdist_metadata, validate_entry,
 };
 pub use layout::discover_top_level_modules;
 pub use pyproject::parse_pyproject;

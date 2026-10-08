@@ -1199,6 +1199,21 @@ are a few dozen to a few hundred packages.
 - Ranking orders findings; it never adds or removes one, so it has no precision or recall of
   its own.
 
+### Implementation (T-17)
+
+- **Input** is a directory of sdists, the set a project installs (`phylaxis project <dir>`).
+  phylaxis does not resolve: that would mean running pip.
+- **Edges** come from each sdist's `PKG-INFO` `Requires-Dist`, read in memory after the same
+  archive validation and limits as extraction (`parse::read_sdist_metadata`); nothing is
+  written. Requirements naming packages outside the set are dropped. An sdist without
+  `PKG-INFO` is a node with *unknown* dependencies and is reported as such, not as having none.
+  Requirements behind an extra or an environment marker are kept and marked `optional`.
+- **Measures:** transitive dependents (reverse breadth-first search), their share of the other
+  packages, direct dependents, and betweenness centrality (Brandes 2001, unweighted, normalised
+  for a directed graph), skipped above 5 000 nodes.
+- **Order:** flagged packages by transitive dependents, then risk, then name. Nodes are added
+  in name order, so the graph and the ranking are a function of the input alone.
+
 ---
 
 ## ADR-028 — Conformance fixes from the test-set error analysis (ruleset 3)

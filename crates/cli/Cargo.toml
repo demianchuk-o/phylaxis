@@ -32,3 +32,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# e2e_project builds its small dependency set of sdists at test time.
+flate2.workspace = true
+tar.workspace = true

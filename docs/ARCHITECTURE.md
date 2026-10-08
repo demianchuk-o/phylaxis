@@ -91,8 +91,10 @@ release the GIL.
 - No dynamic analysis, no sandbox.
 - No wheel or binary analysis (invariant 2); a wheel-only distribution yields a report with
   `skipped: NotAnSdist`.
-- No dependency-graph tier yet (phase 3): `DependencyGraph` and `BlastRadius` exist as types
-  in `core` so the report schema is stable, with construction left as a phase-3 task.
+- No dependency resolution. The prioritisation tier (`phylaxis project`, ADR-027) takes a
+  project's already-resolved set as a directory of sdists and reads each one's declared
+  dependencies from `PKG-INFO`; resolving would mean running pip, and a `setup.py` project's
+  requirements are only knowable by executing it.
 
 ## Keeping this document current
 

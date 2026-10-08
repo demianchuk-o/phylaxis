@@ -42,7 +42,7 @@ pub mod taxonomy;
 pub use ast::{Ast, AstKind, AstNode, Span};
 pub use cache_key::{CacheKey, RulesetVersion};
 pub use config::{ExtractOptions, ScanOptions};
-pub use deps::{BlastRadius, DependencyEdge, DependencyGraph};
+pub use deps::{BlastRadius, DependencyEdge, DependencyGraph, requirement_name};
 pub use error::CoreError;
 pub use finding::{
     Evidence, Finding, MALICIOUS_THRESHOLD, RiskScore, SUSPICIOUS_THRESHOLD, Severity, Snippet,

@@ -8,10 +8,12 @@
 
 pub mod args;
 pub mod output;
+pub mod project;
 pub mod scan;
 
-pub use args::{Cli, Command, ScanArgs};
+pub use args::{Cli, Command, ProjectArgs, ScanArgs};
 pub use output::Format;
+pub use project::{ProjectReport, project_report};
 pub use scan::{ScanError, ScanResult, scan_many, scan_one};
 
 use clap::Parser;
@@ -53,6 +55,7 @@ pub fn run(argv: Vec<String>) -> i32 {
 pub fn dispatch(cli: Cli) -> i32 {
     match cli.command {
         Command::Scan(args) => scan_command(&args),
+        Command::Project(args) => project_command(&args),
         Command::Rules { json } => {
             if json {
                 println!("{}", rules_json());
@@ -120,6 +123,41 @@ fn scan_command(args: &ScanArgs) -> i32 {
 
 /// `cache stats` inspects an existing cache and never creates one: `Cache::open` would
 /// create a missing file, and a read-only command that leaves a file behind is a surprise.
+fn project_command(args: &ProjectArgs) -> i32 {
+    let paths = match project::sdists_in(&args.dir) {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => {
+            eprintln!(
+                "phylaxis: {}: no sdists (.tar.gz) in it",
+                args.dir.display()
+            );
+            return exit::ERROR;
+        }
+        Err(e) => {
+            eprintln!("phylaxis: {}: {e}", args.dir.display());
+            return exit::ERROR;
+        }
+    };
+    let report = project_report(&paths, &args.options());
+    match args.format {
+        Format::Text => print!("{}", project::render_text(&report)),
+        _ => match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("phylaxis: {e}");
+                return exit::ERROR;
+            }
+        },
+    }
+    if report.packages.iter().any(|p| p.problem.is_some()) {
+        exit::ERROR
+    } else if !report.ranked.is_empty() {
+        exit::FLAGGED
+    } else {
+        exit::CLEAN
+    }
+}
+
 fn cache_stats(path: &std::path::Path) -> i32 {
     if !path.is_file() {
         eprintln!("phylaxis: no cache at `{}`", path.display());

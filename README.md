@@ -63,20 +63,22 @@ dependency graph through its metadata; only its code is not analysed.
 
 | Part | State |
 |---|---|
-| Domain model (`core`) | landing block by block — identity, inputs, syntax and symbols are in |
-| Safe extraction, parsing (`parse`) | scaffolded, not implemented |
-| Graphs and reachability (`graph`) | scaffolded, not implemented |
-| Rule catalogue and engine (`rules`) | scaffolded, not implemented |
-| CLI (`cli`), Python bindings (`py`) | scaffolded, not implemented |
+| Domain model (`core`) | complete |
+| Safe extraction, parsing (`parse`) | complete |
+| Graphs and reachability (`graph`) | complete |
+| Rule catalogue and engine (`rules`) | complete — 15 rules, ruleset 3 |
+| CLI (`cli`), Python bindings (`py`) | complete; `phylaxis scan`, `phylaxis project`, `phylaxis rules` |
+| Dependency-tree ranking (`phylaxis project`) | complete (ADR-027) |
+| SARIF output | not started |
 
-The test suite is written ahead of the implementation, so a red test is the specification for
-work not yet done rather than a regression. At present **49 of 129 tests pass**, and the
-remaining 80 are red by design. `cargo clippy --workspace --all-targets -- -D warnings` and
-`cargo fmt --check` are clean.
+**210 tests pass and none fail**; `cargo clippy --workspace --all-targets -- -D warnings` and
+`cargo fmt --check` are clean. Evaluation protocol and results: `docs/EVALUATION.md`,
+`docs/RESULTS.md`.
 
-Code is committed in blocks, and a block only lands once it is green *and* has been read and
-understood by the author — so the history reflects the real pace of the work rather than the
-moment a file was generated.
+```sh
+phylaxis scan some-package-1.0.tar.gz          # one report per input, JSON by default
+phylaxis project deps/ --format text           # a project's dependency set, ranked by blast radius
+```
 
 ## Building
 

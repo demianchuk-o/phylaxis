@@ -677,6 +677,84 @@ pub fn load_directory(dir: &Path, opts: &ExtractOptions) -> Result<ExtractedTree
     ))
 }
 
+/// The declared identity and dependencies of an sdist, from its `PKG-INFO` (core metadata).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SdistMetadata {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    /// Every `Requires-Dist` value, as written (`requests>=2; extra == "socks"`).
+    pub requires_dist: Vec<String>,
+    /// `false` when the archive has no top-level `PKG-INFO`: dependencies are then unknown,
+    /// which is not the same as having none.
+    pub has_pkg_info: bool,
+}
+
+/// Largest `PKG-INFO` read; real ones are a few kilobytes, long descriptions included.
+const MAX_PKG_INFO_BYTES: u64 = 1 << 20;
+
+/// Reads an sdist's `PKG-INFO` **in memory** (T-17, ADR-027). Nothing is written and nothing
+/// is executed: the dependency list of a `setup.py` project is only knowable by running it,
+/// so the static, already-built metadata is the one source used. The archive passes the same
+/// validation and limits as [`extract_sdist`] first.
+pub fn read_sdist_metadata(
+    sdist_path: &Path,
+    opts: &ExtractOptions,
+) -> Result<SdistMetadata, ParseError> {
+    let members = validate_archive(sdist_path, opts)?;
+    let top = single_top_level(&members, sdist_path)?;
+    let mut archive = open_archive(sdist_path)?;
+    let entries = archive
+        .entries()
+        .map_err(|e| ParseError::Archive(e.to_string()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| ParseError::Archive(e.to_string()))?;
+        if entry_kind(entry.header().entry_type()) != Some(EntryKind::File) {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| ParseError::Archive(e.to_string()))?
+            .into_owned();
+        let normalized = normalize_entry(&path.to_string_lossy());
+        if strip_top_level(&normalized, &top).as_deref() != Some("PKG-INFO") {
+            continue;
+        }
+        let mut text = String::new();
+        entry
+            .take(MAX_PKG_INFO_BYTES)
+            .read_to_string(&mut text)
+            .map_err(|e| ParseError::Archive(e.to_string()))?;
+        return Ok(parse_core_metadata(&text));
+    }
+    Ok(SdistMetadata::default())
+}
+
+/// Core metadata is an RFC 822-style header block; the description may follow a blank line
+/// and is ignored. Continuation lines (leading whitespace) belong to the previous field and
+/// never carry a `Requires-Dist`.
+fn parse_core_metadata(text: &str) -> SdistMetadata {
+    let mut meta = SdistMetadata {
+        has_pkg_info: true,
+        ..Default::default()
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().to_owned();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "name" => meta.name = Some(value),
+            "version" => meta.version = Some(value),
+            "requires-dist" if !value.is_empty() => meta.requires_dist.push(value),
+            _ => {}
+        }
+    }
+    meta
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -985,5 +1063,86 @@ mod tests {
             dir.join("setup.py").exists(),
             "load_directory must never delete the source tree"
         );
+    }
+
+    // ── T-17: PKG-INFO read in memory ─────────────────────────────────────────────────
+
+    fn sdist_with(name: &str, members: &[(&str, &str)]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "phylaxis-meta-test-{}-{name}.tar.gz",
+            std::process::id()
+        ));
+        let gz = flate2::write::GzEncoder::new(
+            File::create(&path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut b = tar::Builder::new(gz);
+        for (rel, body) in members {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, rel, body.as_bytes()).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn pkg_info_requirements_are_read_without_writing_anything() {
+        let pkg_info = "Metadata-Version: 2.1
+Name: Demo-Pkg
+Version: 1.2
+Requires-Dist: requests>=2
+Requires-Dist: rich; extra == \"cli\"
+Summary: x
+
+Requires-Dist: not-a-header-in-the-description
+";
+        let p = sdist_with(
+            "reqs",
+            &[
+                ("demo-pkg-1.2/PKG-INFO", pkg_info),
+                ("demo-pkg-1.2/demo/__init__.py", ""),
+            ],
+        );
+        let m = read_sdist_metadata(&p, &ExtractOptions::default()).unwrap();
+        let _ = fs::remove_file(&p);
+        assert!(m.has_pkg_info);
+        assert_eq!(m.name.as_deref(), Some("Demo-Pkg"));
+        assert_eq!(m.version.as_deref(), Some("1.2"));
+        assert_eq!(
+            m.requires_dist,
+            vec!["requests>=2", "rich; extra == \"cli\""]
+        );
+    }
+
+    #[test]
+    fn a_nested_pkg_info_is_not_the_distributions() {
+        let p = sdist_with(
+            "nested",
+            &[
+                (
+                    "demo-1.0/vendor/PKG-INFO",
+                    "Name: other
+Requires-Dist: x
+",
+                ),
+                ("demo-1.0/setup.py", ""),
+            ],
+        );
+        let m = read_sdist_metadata(&p, &ExtractOptions::default()).unwrap();
+        let _ = fs::remove_file(&p);
+        assert!(!m.has_pkg_info);
+        assert!(m.requires_dist.is_empty());
+    }
+
+    #[test]
+    fn metadata_reading_refuses_what_extraction_refuses() {
+        let r = read_sdist_metadata(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/malicious/tar_slip.tar.gz"),
+            &ExtractOptions::default(),
+        );
+        assert!(r.is_err());
     }
 }
