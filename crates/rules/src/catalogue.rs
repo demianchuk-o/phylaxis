@@ -13,7 +13,10 @@ use serde::Serialize;
 /// this number, so a change that moves results without moving it serves stale reports.
 /// 2: receiver typing (ADR-025), a namesake no longer hides a receiver write, phase-filtered
 /// co-occurrence roots.
-pub const RULESET_VERSION: RulesetVersion = RulesetVersion(2);
+/// 3: ADR-028 — `chr` and escape-encoded literals as decoded literals, URLs inside command
+/// strings and f-string text visible to DRP-003 (URL templates only inside a command),
+/// messenger webhooks as egress, regex matches and appended items carry taint.
+pub const RULESET_VERSION: RulesetVersion = RulesetVersion(3);
 
 // ── Source patterns (ADR-006) ─────────────────────────────────────────────────────────
 // Canonical dotted prefixes after import aliasing. `SensitiveFile` patterns are path
@@ -206,6 +209,10 @@ pub const SOURCE_PATTERNS: &[SourcePattern] = &[
     },
     SourcePattern {
         kind: TaintSourceKind::SuspiciousLiteral,
+        pattern: "<literal:command-with-url>",
+    },
+    SourcePattern {
+        kind: TaintSourceKind::SuspiciousLiteral,
         pattern: "<literal:raw-ip>",
     },
     SourcePattern {
@@ -283,6 +290,44 @@ pub const SINK_PATTERNS: &[SinkPattern] = &[
     SinkPattern {
         kind: TaintSinkKind::NetworkEgress,
         pattern: "aiohttp",
+        arg: None,
+    },
+    // Messenger webhooks and bot APIs (ADR-028): the commonest exfiltration channel in the
+    // corpus. Only the sending surface, not the client libraries as a whole: a Discord bot
+    // that reads its token from the environment and logs in is not exfiltrating it.
+    SinkPattern {
+        kind: TaintSinkKind::NetworkEgress,
+        pattern: "discord.SyncWebhook",
+        arg: None,
+    },
+    SinkPattern {
+        kind: TaintSinkKind::NetworkEgress,
+        pattern: "discord.Webhook",
+        arg: None,
+    },
+    SinkPattern {
+        kind: TaintSinkKind::NetworkEgress,
+        pattern: "discord_webhook",
+        arg: None,
+    },
+    SinkPattern {
+        kind: TaintSinkKind::NetworkEgress,
+        pattern: "discordwebhook",
+        arg: None,
+    },
+    SinkPattern {
+        kind: TaintSinkKind::NetworkEgress,
+        pattern: "dhooks",
+        arg: None,
+    },
+    SinkPattern {
+        kind: TaintSinkKind::NetworkEgress,
+        pattern: "telebot.TeleBot",
+        arg: None,
+    },
+    SinkPattern {
+        kind: TaintSinkKind::NetworkEgress,
+        pattern: "telegram.Bot",
         arg: None,
     },
     SinkPattern {

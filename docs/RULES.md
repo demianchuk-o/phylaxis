@@ -102,7 +102,7 @@ source of truth; the tables below describe them.
 
 | | |
 |---|---|
-| Catches | A literal containing a shell pipeline to a fetcher (`curl … | sh`, `wget … -O- | bash`, `powershell -enc …`, `certutil -urlcache`), a raw IP endpoint, or a non-index URL, reaching `subprocess`/`os.system`/`os.popen`. |
+| Catches | A literal containing a shell pipeline to a fetcher (`curl … | sh`, `wget … -O- | bash`, `powershell -enc …`, `certutil -urlcache`), a raw IP endpoint, or a non-index URL — alone or inside a command line (`curl.exe -L https://h/a.exe -o x`), including the fixed text of an f-string (ADR-028) — reaching `subprocess`/`os.system`/`os.popen`. |
 | Technique | Objective: **dropper**; execution: install dominant. |
 | Sources → sinks | `SuspiciousLiteral` → `CodeExecution`. `Data` (path of length ≥ 1). |
 | Severity | Critical |
@@ -113,7 +113,7 @@ source of truth; the tables below describe them.
 
 | | |
 |---|---|
-| Catches | A string literal decoded by `base64`/hex/`codecs`/`zlib`/`marshal`/reversal/`chr`-join (ADR-018 folding) whose result reaches `exec`, `eval`, `compile` or `subprocess`. |
+| Catches | A string literal decoded by `base64`/hex/`codecs`/`zlib`/`marshal`/reversal/`chr`-join (ADR-018 folding), or written in escape sequences that spell printable text (`"\145\166\141\154"` for `eval`, ADR-028), whose result reaches `exec`, `eval`, `compile` or `subprocess`. |
 | Technique | Obfuscation: **encoding** (Backstabber's dominant obfuscation); objective inferred from the decoded payload where folding succeeds. |
 | Sources → sinks | `DecodedLiteral` → `CodeExecution`. `Data`. Path is marked `obfuscated`. |
 | Severity | Critical |

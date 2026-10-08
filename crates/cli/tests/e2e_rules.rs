@@ -184,3 +184,55 @@ fn install_phase_outranks_runtime_for_the_same_path() {
     assert_eq!(install.report.verdict, Verdict::Malicious);
     assert_eq!(runtime.report.verdict, Verdict::Suspicious);
 }
+
+/// ADR-028's shapes, one twin pair each, beyond the one pair per rule the catalogue names.
+/// The positive must yield the rule; the negative keeps the vocabulary, loses the path, and
+/// must stay below Suspicious.
+#[test]
+fn adr_028_shapes_fire_and_their_twins_do_not() {
+    let pairs = [
+        (
+            "PHX-OBF-001",
+            "malicious/escaped_eval",
+            "benign/escaped_ansi_print",
+        ),
+        (
+            "PHX-OBF-001",
+            "malicious/chr_list_exec",
+            "benign/chr_list_print",
+        ),
+        (
+            "PHX-DRP-003",
+            "malicious/download_cmd_exec",
+            "benign/template_url_git",
+        ),
+        (
+            "PHX-EXF-003",
+            "malicious/discord_webhook_beacon",
+            "benign/discord_webhook_static",
+        ),
+        (
+            "PHX-EXF-001",
+            "malicious/token_regex_exfil",
+            "benign/token_regex_local",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (rule, positive, negative) in pairs {
+        let pos = scan_one(&fixture(positive), &ScanOptions::default()).unwrap();
+        if !pos.report.findings.iter().any(|f| f.rule.as_str() == rule) {
+            failures.push(format!("{rule}: did not fire on {positive}"));
+        }
+        let neg = scan_one(&fixture(negative), &ScanOptions::default()).unwrap();
+        if neg.report.verdict >= Verdict::Suspicious {
+            let ids: Vec<_> = neg
+                .report
+                .findings
+                .iter()
+                .map(|f| f.rule.as_str())
+                .collect();
+            failures.push(format!("{negative} is {:?}: {ids:?}", neg.report.verdict));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

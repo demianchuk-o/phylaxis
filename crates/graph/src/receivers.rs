@@ -29,6 +29,25 @@ const LOWERCASE_CONSTRUCTORS: &[&str] = &[
     "urllib.request.build_opener",
 ];
 
+/// Class-method factories whose result is an instance of their class (ADR-028), as
+/// `(factory, class)`. A closed list for the same reason as [`LOWERCASE_CONSTRUCTORS`]:
+/// `C.method(…)` returns a `C` often enough to tempt a rule and rarely enough to make it
+/// wrong (`datetime.strptime` does; `str.maketrans` does not).
+const FACTORIES: &[(&str, &str)] = &[
+    ("discord.SyncWebhook.from_url", "discord.SyncWebhook"),
+    ("discord.SyncWebhook.partial", "discord.SyncWebhook"),
+    ("discord.Webhook.from_url", "discord.Webhook"),
+    ("discord.Webhook.partial", "discord.Webhook"),
+];
+
+/// The class a factory call constructs, if `name` is one of [`FACTORIES`].
+pub fn factory_type(name: &QualifiedName) -> Option<QualifiedName> {
+    FACTORIES
+        .iter()
+        .find(|(f, _)| *f == name.as_str())
+        .map(|(_, class)| QualifiedName::new(*class))
+}
+
 /// What a typed name holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceiverType {

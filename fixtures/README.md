@@ -82,6 +82,11 @@ from the fixture side.
 | `setup_py_exfil/` | PHX-INS-001 + EXF-001 | egress inside a `cmdclass` `run()` — the *other* install root |
 | `setup_py_exec_b64/` | PHX-INS-002 + OBF-001 | decoded literal executed at install time |
 | `setup_py_reads_ssh/` | PHX-INS-003 | a sensitive read at install time with **no sink** |
+| `escaped_eval/` | PHX-OBF-001 | a builtin's name spelled in octal/hex escapes, then called (ADR-028) |
+| `chr_list_exec/` | PHX-OBF-001 | `chr` over a code list, executed, with no other decoder (ADR-028) |
+| `download_cmd_exec/` | PHX-DRP-003 | the endpoint is one word of an f-string command line (ADR-028) |
+| `discord_webhook_beacon/` | PHX-EXF-003 | hostname → a factory-built Discord webhook (ADR-028) |
+| `token_regex_exfil/` | PHX-EXF-001 | env path → read → `re.findall` → `append` → post: the stealer chain (ADR-028) |
 | `setup_py_marker/` | — | safety fixture: writes `PHYLAXIS_EXECUTED` *if* executed. The marker's absence is the assertion. |
 
 ### benign
@@ -103,6 +108,11 @@ from the fixture side.
 | `clean_build_dir/` | PHX-SAB-001 | `rmtree` on relative `build/`, which is not a sensitive path |
 | `setup_py_plain/` | PHX-INS-001 | a `setup.py` that only calls `setup()` |
 | `setup_py_env_cflags/` | PHX-INS-003 | reads `CFLAGS`/`LDFLAGS`/`CC`, which are on the build-variable allow-list |
+| `escaped_ansi_print/` | PHX-OBF-001 | escapes only for control characters, nothing executed |
+| `chr_list_print/` | PHX-OBF-001 | the same code list, printed |
+| `template_url_git/` | PHX-DRP-003 | a URL *template* handed to `git`: templates match only inside a command line |
+| `discord_webhook_static/` | PHX-EXF-003 | the same webhook, sending fixed text |
+| `token_regex_local/` | PHX-EXF-001 | the same read/match/collect, counted locally; only a fixed request leaves |
 
 Two of the "benign" fixtures are **accepted false positives** rather than clean negatives, and
 `docs/RULES.md` says so. They are here to pin the accepted level, so that a change which

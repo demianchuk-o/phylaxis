@@ -43,6 +43,9 @@ pub const TAINT_PRESERVING: &[(&str, bool)] = &[
     ("os.path", false),
     ("pathlib", false),
     ("urllib.parse", false),
+    // A regex match is a piece of the text it was run over (ADR-028): stealers find tokens
+    // in what they read before sending them.
+    ("re", false),
     // Opening a file carries the path's taint into the handle, and `read` (below) carries
     // it into the content: a `SensitiveFile` source is a path, and the secret is what the
     // path opens (ADR-006). An over-approximation: the handle is not the path.
@@ -116,6 +119,16 @@ const PRESERVING_METHODS: &[&str] = &[
     "read_text",
     "read_bytes",
     "getvalue",
+    // A compiled pattern's matches and a match's groups are pieces of the searched text
+    // (ADR-028): `pat.findall(content)`, `m.group(1)`.
+    "findall",
+    "finditer",
+    "search",
+    "match",
+    "fullmatch",
+    "group",
+    "groups",
+    "groupdict",
     // A descriptor is the object under another name: `os.dup2(s.fileno(), 0)` duplicates
     // the socket itself.
     "fileno",
@@ -147,6 +160,14 @@ const RECEIVER_TAINTING_METHODS: &[&str] = &[
     "sendto",
     "connect",
     "connect_ex",
+    // Container mutation (ADR-028): `found.append(token)` puts the token in the list that
+    // is sent later. ADR-007 already asks unmodelled containers to propagate taint; a list
+    // built by appending was the gap, and it is how stealers collect what they find.
+    "append",
+    "extend",
+    "insert",
+    "add",
+    "update",
 ];
 
 /// Calls whose result is a handle on the path in their first argument. Data written into
@@ -560,6 +581,16 @@ impl Walker<'_> {
                 let text = ast.text_of(id).unwrap_or_default();
                 let label = crate::symbols::str_literal(text).unwrap_or_else(|| text.to_owned());
                 vec![self.node(ast, id, FlowNodeKind::Literal, owner, None, label)]
+            }
+            // An f-string is its `{…}` expressions plus its fixed text (ADR-028). The text is
+            // a literal like any other, with `{}` for each hole, so a URL or a sensitive path
+            // written around an interpolation stays visible to the literal matchers.
+            AstKind::String => {
+                let mut values = self.union_of_children(ast, id, owner, depth);
+                if let Some(template) = fstring_template(ast, id) {
+                    values.push(self.node(ast, id, FlowNodeKind::Literal, owner, None, template));
+                }
+                values
             }
             // A comparison or `not x` yields a boolean: nothing of the operands survives,
             // exactly like `len(x)`. Their calls still need nodes.
@@ -1378,6 +1409,27 @@ enum Slot {
 }
 
 /// Whether a string node contains an f-string interpolation anywhere below it.
+/// The fixed text of an interpolated string, prefix and quotes removed, each `{…}` replaced
+/// by `{}`: `f'curl -L https://h/a -o "{out}"'` gives `curl -L https://h/a -o "{}"`. `None`
+/// when nothing but holes is left, since an empty template matches nothing.
+fn fstring_template(ast: &Ast, id: AstNodeId) -> Option<String> {
+    let node = ast.get(id)?;
+    let mut text = ast.text_of(id)?.to_owned();
+    for c in &node.children {
+        if ast.child_by_field(*c, "expression").is_some() {
+            if let Some(hole) = ast.text_of(*c) {
+                text = text.replacen(hole, "{}", 1);
+            }
+        }
+    }
+    let body = text.trim_start_matches(|c: char| "fFrRbBuU".contains(c));
+    let body = ["\"\"\"", "'''", "\"", "'"]
+        .iter()
+        .find_map(|q| body.strip_prefix(q).and_then(|r| r.strip_suffix(q)))
+        .unwrap_or(body);
+    (!body.replace("{}", "").trim().is_empty()).then(|| body.to_owned())
+}
+
 fn has_interpolation(ast: &Ast, id: AstNodeId) -> bool {
     let Some(node) = ast.get(id) else {
         return false;

