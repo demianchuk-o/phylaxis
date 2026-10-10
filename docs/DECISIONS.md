@@ -1519,6 +1519,11 @@ the headline. The headline, on data no ruleset was shaped by:
 | D, ruleset 6 | 0.957 | 157 | 0.919 |
 | A, file co-occurrence | 0.966 | 366 | 0.832 |
 | GuardDog | 0.959 | 817 | 0.687 |
+| Aura | 0.971 | 597 | 0.753 |
+
+Aura catches 26 more packages than D at 3.8 times the false positives. 78 of its 85 errors are
+benign packages (44 over the 600 s limit, 34 deterministic crashes, mostly on Python 2 syntax), counted
+as not flagged; counted as false positives instead, Aura's FP/1k is 675.
 
 ---
 

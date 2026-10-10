@@ -202,6 +202,7 @@ Every entry is malicious. `new` is the packages no earlier run has seen; `all` a
 | D reachability + phase (ruleset 6) | 0.40 | 1870 | 1000 | 1790 | 157 | 80 | 843 | 0.919 | 0.957 | 0.938 | 157.0 | — | 66 | 7 | 976 |
 | D reachability + phase (ruleset 6) | 0.70 | 1870 | 1000 | 147 | 22 | 1723 | 978 | 0.870 | 0.079 | 0.144 | 22.0 | — | 66 | 7 | 976 |
 | GuardDog | any rule | 1870 | 1000 | 1793 | 817 | 77 | 183 | 0.687 | 0.959 | 0.800 | 817.0 | — | 10 | 725 | 2298 |
+| Aura | score > 0 | 1870 | 1000 | 1816 | 597 | 54 | 403 | 0.753 | 0.971 | 0.848 | 597.0 | — | 85 | 4361 | 131328 |
 
 phylaxis errors are almost all skips (no Python source, over the size limit, archive entries the safe extractor refuses), identical across A–D. Worst case for D (ruleset 6) at τ = 0.40: if all 64 skipped benign packages counted as false positives, FP/1k would be 221.0 instead of 157.0.
 
@@ -235,7 +236,7 @@ A detection is attributed when the package is flagged and some finding has a ste
 | generated | 2026-10-10 by `eval/report.py` |
 | OS / CPU | Linux 6.18.40.1-microsoft-standard-WSL2 / x86_64 |
 | rustc | ? |
-| phylaxis commit (report generated at) | f885ce2 |
+| phylaxis commit (report generated at) | 37a1c75 |
 | rulesets reported | ruleset 2, ruleset 5, ruleset 6 |
 | GuardDog version | 3.2.0 |
 | Aura image | `sourcecodeai/aura:dev@sha256:2f5cb08039ef9aca1ff29ff853537fa87c27fba3184f223437976e28e5ff67ad` |
@@ -259,3 +260,4 @@ A detection is attributed when the package is flagged and some finding has a ste
 | 2026-10-10 | holdout `fresh` drawn (`eval/manifest_fresh.py`, `eval/manifest_fresh_benign.py`) | ADR-031; malicious half frozen before ruleset 6 was built | R7 |
 | 2026-10-10 | evaluation moved into WSL2 (Ubuntu 24.04), Linux wheels | the Windows antivirus was quarantining extracted samples and costing 20–85 % CPU; timings from here on are Linux timings | R1, R6, R7 (ruleset 6) |
 | 2026-10-10 | phylaxis A–D, ruleset 6, on the test set, Backstabber and `fresh`; ruleset 5 on `fresh`; GuardDog on `fresh` | ADR-031 | R1–R4, R6–R8 |
+| 2026-10-10 | Aura on `fresh`, 2 870 rows, 85 errors (48 timeouts at 600 s; 37 Aura crashes: 27 `Unknown AST type for arg` on Python 2 syntax, 3 `OverflowError`, 2 unsupported archive members, 1 unicode surrogate, 4 exit 1 with no traceback; every one reproduced one at a time, so not rerun) | ADR-031, Docker Desktop, 8 containers | R7 |
