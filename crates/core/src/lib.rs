@@ -19,7 +19,7 @@
 //! - `deps`      DependencyGraph, BlastRadius [18]
 //! - `cache_key` CacheKey [19], RulesetVersion [20]
 //! - `report`    ScanReport [21], AnalysisMode [22]
-//! - `config`    ScanOptions, ExtractOptions
+//! - `config`    ScanOptions, ExtractOptions, CacheRetention
 //! - `error`     CoreError
 
 pub mod ast;
@@ -41,7 +41,7 @@ pub mod taxonomy;
 
 pub use ast::{Ast, AstKind, AstNode, Span};
 pub use cache_key::{CacheKey, RulesetVersion};
-pub use config::{ExtractOptions, ScanOptions};
+pub use config::{CacheRetention, ExtractOptions, ScanOptions};
 pub use deps::{BlastRadius, DependencyEdge, DependencyGraph, requirement_name};
 pub use error::CoreError;
 pub use finding::{

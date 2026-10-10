@@ -27,6 +27,30 @@ impl Default for ExtractOptions {
     }
 }
 
+/// How the result cache is kept bounded (ADR-032). Applied once, at the end of a run, in
+/// the same write that records which entries were used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheRetention {
+    /// Entries not used for this many days are dropped. `None` keeps them however old.
+    pub max_age_days: Option<u32>,
+    /// Above this many bytes of stored keys and reports, the least recently used entries are
+    /// dropped until it fits. `None` sets no cap.
+    pub max_bytes: Option<u64>,
+}
+
+impl Default for CacheRetention {
+    /// Thirty days without use, no size cap. WHY these: a dependency whose version moved on
+    /// is never asked for again, so the age rule alone frees what a version bump leaves
+    /// behind; a cap is for machines that want a hard bound, and only they know the number.
+    fn default() -> Self {
+        Self {
+            max_age_days: Some(30),
+            max_bytes: None,
+        }
+    }
+}
+
 /// Options of one scan or batch. Serialisable because the Python API passes them as JSON
 /// (ADR-013).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -40,6 +64,7 @@ pub struct ScanOptions {
     pub jobs: Option<usize>,
     /// Path of the redb cache file. `None` disables caching.
     pub cache_path: Option<PathBuf>,
+    pub cache_retention: CacheRetention,
     pub extract: ExtractOptions,
 }
 

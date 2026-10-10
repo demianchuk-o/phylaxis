@@ -3,8 +3,8 @@
 A digest for humans, not a code dump: what happens to an sdist, in order, and which crate owns each step. Decisions referenced as ADR-nnn are in `DECISIONS.md`; the safety guarantees and the threat model behind them are in `SAFETY.md`.
 ## The pipeline in one paragraph
 
-An sdist (`.tar.gz`) or an already-extracted directory goes in. Its sha256 and the current
-ruleset version form a cache key; a hit returns the stored report unchanged. On a miss the
+An sdist (`.tar.gz`) or an already-extracted directory goes in. Its sha256, the current
+ruleset version and the report schema version form a cache key; a hit returns the stored report unchanged. On a miss the
 archive is extracted with path-traversal protection and with only Python source written to
 disk — every other member is recorded by path and dropped unread (ADR-020) — every `.py`,
 `setup.py` and `pyproject.toml` is parsed by tree-sitter and lowered into an owned AST, the ASTs are joined
@@ -31,7 +31,7 @@ package code is ever executed, and nothing in the package can cause a network re
 | 10 | Rules | `rules` | `PackageGraph + Catalogue` → `Vec<Finding>` | RULES.md; one query per rule; confidence and phase attached. |
 | 11 | Score | `rules` | `[Finding]` → `RiskScore`, `Verdict` | ADR-010. |
 | 12 | Report | `core` | everything → `ScanReport` | Serialisable, versioned schema. |
-| 13 | Cache store | `cache` | `CacheKey + ScanReport` → () | Never overwritten. |
+| 13 | Cache store | `cache` | `CacheKey + ScanReport` → () | Never overwritten. At the end of a run, one write records which entries were used and drops the stale and the long-unused (ADR-032). |
 | 14 | Output | `cli` | `ScanReport` → json / sarif / text; exit code | Same code path for binary and Python (`run()`). |
 | 15 | Python API | `py` | path(s) → JSON string → dict in the shim | ADR-013; `scan_many` releases the GIL and uses `rayon` across packages. |
 

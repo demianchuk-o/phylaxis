@@ -55,7 +55,9 @@ pub struct ScanResult {
 /// every input must produce a row for the coverage table (EVALUATION.md §2).
 pub fn scan_one(path: &Path, opts: &ScanOptions) -> Result<ScanResult, ScanError> {
     let cache = open_cache(opts)?;
-    scan_with(path, opts, cache.as_ref())
+    let result = scan_with(path, opts, cache.as_ref());
+    finish_cache(cache, opts);
+    result
 }
 
 /// Scans many inputs in parallel with `rayon`, returning results in input order; each
@@ -93,12 +95,25 @@ pub fn scan_many(paths: &[PathBuf], opts: &ScanOptions) -> Vec<Result<ScanResult
     // `install` makes the pool current for everything underneath, including `parse_all`'s
     // own `par_iter`, so `--jobs` bounds the whole scan and not only the outer loop. A
     // pool that fails to build falls back to the global one rather than failing the batch.
-    match opts
+    let results = match opts
         .jobs
         .map(|n| rayon::ThreadPoolBuilder::new().num_threads(n).build())
     {
         Some(Ok(pool)) => pool.install(run),
         _ => run(),
+    };
+    finish_cache(cache, opts);
+    results
+}
+
+/// The end of a run's use of the cache: one write recording which entries were used, and the
+/// retention sweep (ADR-032). Its failure is a warning, never a failed scan: every report of
+/// the run is already computed and correct, and the cache only ever saves time.
+fn finish_cache(cache: Option<Cache>, opts: &ScanOptions) {
+    if let Some(c) = cache {
+        if let Err(e) = c.finish(RULESET_VERSION, &opts.cache_retention) {
+            eprintln!("phylaxis: warning: cache maintenance failed: {e}");
+        }
     }
 }
 
@@ -114,15 +129,37 @@ fn cacheable(opts: &ScanOptions) -> bool {
     opts.mode == d.mode && opts.min_confidence == d.min_confidence && opts.extract == d.extract
 }
 
+/// Opens the cache when the options allow one. Two cases run without it instead of failing:
+/// another process holds the file (redb locks it exclusively, and two scans at once on one
+/// machine are ordinary), and the default cache directory cannot be created. Anything else —
+/// a damaged file, a path the user named that cannot be opened — is an error, because
+/// silently running cold would hide it (card G).
 fn open_cache(opts: &ScanOptions) -> Result<Option<Cache>, ScanError> {
     match &opts.cache_path {
         Some(p) if cacheable(opts) => {
-            Cache::open(p)
-                .map(Some)
-                .map_err(|e| ScanError::CacheUnavailable {
+            if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+                if let Err(e) = std::fs::create_dir_all(dir) {
+                    eprintln!(
+                        "phylaxis: warning: no cache, `{}` could not be created: {e}",
+                        dir.display()
+                    );
+                    return Ok(None);
+                }
+            }
+            match Cache::open(p) {
+                Ok(c) => Ok(Some(c)),
+                Err(e) if e.is_locked() => {
+                    eprintln!(
+                        "phylaxis: warning: cache `{}` is in use by another phylaxis; scanning without it",
+                        p.display()
+                    );
+                    Ok(None)
+                }
+                Err(e) => Err(ScanError::CacheUnavailable {
                     path: p.clone(),
                     reason: e.to_string(),
-                })
+                }),
+            }
         }
         _ => Ok(None),
     }

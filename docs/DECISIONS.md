@@ -636,9 +636,20 @@ over green.
   is shaped are unchanged; folding the schema into the same counter keeps invariant 6 to one
   number. `ScanReport.schema_version` is still emitted for consumers.
 - Cache entries are never overwritten and never expire: PyPI filenames are immutable.
+  *(Amended 2026-10-10: entries are never wrong, but they are now removed when unused; ADR-032.)*
 - Directories scanned from disk (not an sdist) are **not cached**: their content has no stable
   identity. The alternative, hashing the directory tree, was rejected because the identity
   claim rests on PyPI immutability, which a directory lacks.
+
+---
+
+**Amended 2026-10-10 — the schema version joins the key.** `CacheKey` is now
+`sha256 ‖ ruleset_version ‖ schema_version` (40 bytes), and `CacheKey::new` takes the schema
+from `SCHEMA_VERSION` itself. The convention above (bump the ruleset when the report shape
+changes) was the weakest link in invariant 6: correct only if someone remembered it, and
+caught only by a decode error when they did not. The schema has never changed (still 1); the
+cost is four bytes per key. Caches written before the amendment have 36-byte keys, which no
+current key can reach; ADR-032's sweep removes them.
 
 ---
 
@@ -1508,6 +1519,68 @@ the headline. The headline, on data no ruleset was shaped by:
 | D, ruleset 6 | 0.957 | 157 | 0.919 |
 | A, file co-occurrence | 0.966 | 366 | 0.832 |
 | GuardDog | 0.959 | 817 | 0.687 |
+
+---
+
+## ADR-032 — The result cache is bounded: batched last use, age, optional size cap
+
+**Date:** 2026-10-10. **Status:** accepted.
+
+### Context
+
+ADR-017's cache is correct forever and also grows forever. Two kinds of entry are dead weight:
+those of an older ruleset or report schema, which no key can reach again, and those of a
+dependency version a project has moved past, which nobody will ask for again. On a developer's
+machine the cache is meant to be shared across projects. In CI it persists only where the
+pipeline keeps it (a cache step, or a self-hosted runner's disk), and there nothing else ever
+cleans it.
+
+### Choice
+
+- **Last use is bookkeeping beside the report, written once per run.** A second table,
+  `last_used`, maps each key to the day (UTC, days since 1970) it was stored or last read.
+  Hits are collected in memory during the run, and `Cache::finish` writes them in one
+  transaction at the end. An entry already marked today costs no write. The report rows are
+  untouched, so a cached report stays byte-identical to the computed one.
+- **The sweep runs in the same transaction, after the touches:**
+  1. entries of another ruleset or schema are removed;
+  2. entries not used for `max_age_days` (default 30) are removed;
+  3. if `max_bytes` is set and exceeded, the least recently used are removed until it fits
+     (ties by key).
+
+  If anything was removed, the file is compacted: redb reuses freed pages but does not shrink
+  the file on its own.
+- **A default location.** The CLI caches by default in `phylaxis/cache.redb` under the per-user
+  cache directory (`$XDG_CACHE_HOME` or `~/.cache`, `~/Library/Caches`, `%LOCALAPPDATA%`), or
+  under `$PHYLAXIS_CACHE_DIR`. `--no-cache` turns it off and `--cache` names another file.
+  `--cache-max-age-days` (0 = no age rule) and `--cache-max-mb` set the retention.
+  `phylaxis cache clear` deletes the file.
+  - The Python API is unchanged: it caches only when given a path. The evaluation harness
+    therefore never reads a cached result by accident.
+- **A cache held by another process is skipped with a warning.** redb locks a file
+  exclusively, and two scans at once on one machine are ordinary. A damaged file, or a path
+  the user named that cannot be opened, is still an error (card G's reasoning).
+- **The end of a run fails soft.** A failed `finish` is a warning. A run that crashes never
+  reaches it: its touches are lost, so some entries look older than they are, and the worst
+  outcome is one rescan.
+
+### Alternatives considered
+
+- **Record every hit as it happens (a true LRU).** Each hit would take redb's single write
+  lock, and parallel workers would queue on bookkeeping for a read. Rejected; a day's
+  resolution batched at the end is enough.
+- **A timestamp inside the stored report.** Would make cached reports differ from computed
+  ones. Rejected.
+- **Expire by when the entry was stored (FIFO).** Evicts a dependency that is used every day
+  just because it was cached long ago. Rejected for last use.
+- **No default location (opt-in, as before).** Then the cache that makes repeated local scans
+  cheap is the one nobody turns on. Rejected for the CLI; kept for the Python API, where the
+  caller is a program.
+
+### Consequences
+
+Not an analysis change: no report, finding or score changes, so `RULESET_VERSION` stays 6.
+The cache key layout changes (ADR-017 amended), which empties old caches once.
 
 ---
 

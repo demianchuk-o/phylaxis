@@ -68,7 +68,16 @@ pub fn dispatch(cli: Cli) -> i32 {
         }
         Command::Cache {
             command: args::CacheCommand::Stats { path },
-        } => cache_stats(&path),
+        } => match path.or_else(args::default_cache_path) {
+            Some(p) => cache_stats(&p),
+            None => no_cache_dir(),
+        },
+        Command::Cache {
+            command: args::CacheCommand::Clear { path },
+        } => match path.or_else(args::default_cache_path) {
+            Some(p) => cache_clear(&p),
+            None => no_cache_dir(),
+        },
     }
 }
 
@@ -158,6 +167,29 @@ fn project_command(args: &ProjectArgs) -> i32 {
     }
 }
 
+fn no_cache_dir() -> i32 {
+    eprintln!("phylaxis: no cache directory could be named; pass --path");
+    exit::ERROR
+}
+
+/// Deletes the cache file. Not finding one is not an error: the cache is already empty.
+fn cache_clear(path: &std::path::Path) -> i32 {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            println!("{}: removed", path.display());
+            exit::CLEAN
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("{}: no cache", path.display());
+            exit::CLEAN
+        }
+        Err(e) => {
+            eprintln!("phylaxis: {}: {e}", path.display());
+            exit::ERROR
+        }
+    }
+}
+
 fn cache_stats(path: &std::path::Path) -> i32 {
     if !path.is_file() {
         eprintln!("phylaxis: no cache at `{}`", path.display());
@@ -166,9 +198,11 @@ fn cache_stats(path: &std::path::Path) -> i32 {
     match phylaxis_cache::Cache::open(path).and_then(|c| c.stats()) {
         Ok(s) => {
             println!(
-                "{}: {} entries, ruleset version {}",
+                "{}: {} entries ({} stale, removed at the end of the next scan), {:.1} MB stored, ruleset version {}",
                 path.display(),
                 s.entries,
+                s.stale,
+                s.bytes as f64 / (1024.0 * 1024.0),
                 ruleset_version()
             );
             exit::CLEAN
