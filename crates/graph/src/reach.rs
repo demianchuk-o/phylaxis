@@ -167,6 +167,31 @@ pub fn find_sources(pg: &PackageGraph, patterns: &[SourcePattern]) -> Vec<TaintS
     out
 }
 
+/// Whether `from`, followed backwards along data flow for at most `MAX_PATH_PARTS_NODES`
+/// nodes, reaches one of `targets`.
+fn traces_back_to(
+    d: &petgraph::Graph<FlowNode, FlowEdge>,
+    from: NodeIndex,
+    targets: &BTreeSet<NodeIndex>,
+) -> bool {
+    let mut seen = BTreeSet::from([from]);
+    let mut queue = VecDeque::from([from]);
+    while let Some(i) = queue.pop_front() {
+        if targets.contains(&i) {
+            return true;
+        }
+        for e in d.edges_directed(i, Direction::Incoming) {
+            if seen.len() >= MAX_PATH_PARTS_NODES {
+                return false;
+            }
+            if seen.insert(e.source()) {
+                queue.push_back(e.source());
+            }
+        }
+    }
+    false
+}
+
 /// The decoders whose result, applied to a constant, is a `DecodedLiteral`: ADR-018's list
 /// minus the entries that are not decoders (`join`, reversal and re-encoding hide nothing
 /// from a reader). Canonical names, matched with `is_under`.
@@ -662,6 +687,33 @@ pub fn find_sinks(pg: &PackageGraph, patterns: &[SinkPattern]) -> Vec<TaintSink>
                     });
                 }
             }
+        }
+    }
+    // `<interpreter-stdin>` (ADR-031): data sent to the standard input of a process that
+    // is an interpreter reading its program from there. The receiver is traced back a
+    // bounded distance to the process call.
+    for p in patterns
+        .iter()
+        .filter(|p| p.pattern == "<interpreter-stdin>")
+    {
+        for (input, through) in &pg.dfg.stdin_writes {
+            if !through
+                .iter()
+                .any(|r| traces_back_to(d, *r, &pg.dfg.interpreters))
+            {
+                continue;
+            }
+            let n = &d[*input];
+            let Some(definition) = pg.call_graph.node_of(n.owner) else {
+                continue;
+            };
+            out.push(TaintSink {
+                kind: p.kind,
+                pattern: QualifiedName::new(p.pattern),
+                location: location(pg, n.file, n.span),
+                node: *input,
+                definition,
+            });
         }
     }
     out.sort_by(|a, b| (&a.location, a.node, a.kind).cmp(&(&b.location, b.node, b.kind)));
@@ -1351,6 +1403,37 @@ mod tests {
             .into_iter()
             .map(|s| s.pattern.as_str().to_owned())
             .collect()
+    }
+
+    const STDIN: &[SinkPattern] = &[SinkPattern {
+        kind: TaintSinkKind::CodeExecution,
+        pattern: "<interpreter-stdin>",
+        arg: None,
+    }];
+
+    fn stdin_sinks(src: &str) -> usize {
+        find_sinks(&graph_from_sources(&[("pkg/a.py", src)]), STDIN).len()
+    }
+
+    // ADR-031 (G11): data piped into an interpreter that reads its program from stdin, in
+    // the three ways it is sent; and not when the interpreter was given its program already.
+    #[test]
+    fn interpreter_stdin_is_a_sink_only_for_an_interpreter_without_a_script() {
+        for src in [
+            "import subprocess, sys\np = subprocess.Popen([sys.executable, '-'], stdin=subprocess.PIPE)\np.communicate(code)\n",
+            "import subprocess\np = subprocess.Popen(['python3'], stdin=subprocess.PIPE)\np.stdin.write(code)\n",
+            "import subprocess\nsubprocess.run(['bash', '-s'], input=code)\n",
+            "import subprocess, sys\nsubprocess.Popen([sys.executable, '-u'], stdin=subprocess.PIPE).communicate(input=code)\n",
+        ] {
+            assert_eq!(stdin_sinks(src), 1, "{src}");
+        }
+        for src in [
+            "import subprocess, sys\np = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.PIPE)\np.communicate(data)\n",
+            "import subprocess\np = subprocess.Popen(['sort'], stdin=subprocess.PIPE)\np.communicate(data)\n",
+            "import subprocess\nsubprocess.run(['python', 'tool.py'], input=data)\n",
+        ] {
+            assert_eq!(stdin_sinks(src), 0, "{src}");
+        }
     }
 
     // `<write:…>` sinks: a write into a handle, matched on what the opened path is built

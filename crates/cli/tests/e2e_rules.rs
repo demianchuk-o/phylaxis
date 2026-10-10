@@ -236,3 +236,71 @@ fn adr_028_shapes_fire_and_their_twins_do_not() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// ADR-031's shapes: paths that existed in the code but that the graph dropped. Same contract
+/// as ADR-028's pairs: the positive yields the rule, the twin keeps the vocabulary and the
+/// network call, loses the path, and stays below Suspicious.
+#[test]
+fn adr_031_shapes_fire_and_their_twins_do_not() {
+    let pairs = [
+        // G2: a method call on a response carries the response.
+        (
+            "PHX-DRP-001",
+            "malicious/json_field_exec",
+            "benign/json_field_print",
+        ),
+        (
+            "PHX-DRP-002",
+            "malicious/stream_chunks_run",
+            "benign/stream_chunks_save",
+        ),
+        // G3: a write through an `open(…)` that is never bound to a name.
+        (
+            "PHX-DRP-002",
+            "malicious/chained_write_run",
+            "benign/chained_write_keep",
+        ),
+        // G10: a download saved to a path by the library, not by a write call.
+        (
+            "PHX-DRP-002",
+            "malicious/urlretrieve_run",
+            "benign/urlretrieve_dataset",
+        ),
+        // G11: code piped into an interpreter's standard input.
+        (
+            "PHX-DRP-001",
+            "malicious/stdin_pipe_exec",
+            "benign/stdin_pipe_fixed",
+        ),
+        // G4: arguments a thread passes to its target.
+        (
+            "PHX-EXF-001",
+            "malicious/thread_args_exfil",
+            "benign/thread_args_status",
+        ),
+        // G5: a file loaded into an object by a method's argument.
+        (
+            "PHX-EXF-002",
+            "malicious/configparser_exfil",
+            "benign/configparser_local",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (rule, positive, negative) in pairs {
+        let pos = scan_one(&fixture(positive), &ScanOptions::default()).unwrap();
+        if !pos.report.findings.iter().any(|f| f.rule.as_str() == rule) {
+            failures.push(format!("{rule}: did not fire on {positive}"));
+        }
+        let neg = scan_one(&fixture(negative), &ScanOptions::default()).unwrap();
+        if neg.report.verdict >= Verdict::Suspicious {
+            let ids: Vec<_> = neg
+                .report
+                .findings
+                .iter()
+                .map(|f| f.rule.as_str())
+                .collect();
+            failures.push(format!("{negative} is {:?}: {ids:?}", neg.report.verdict));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

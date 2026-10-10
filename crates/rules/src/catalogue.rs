@@ -19,7 +19,9 @@ use serde::Serialize;
 /// 4: ADR-029 — execution sinks match their first argument only; PHX-DRP-002 requires the
 /// path to pass through a file write.
 /// 5: ADR-030 — `conditional` set on paths whose sink sits under an environment guard.
-pub const RULESET_VERSION: RulesetVersion = RulesetVersion(5);
+/// 6: ADR-031 — paths the graph dropped: response accessor methods, unnamed and library
+/// file writes, interpreter stdin, callback arguments, loading methods.
+pub const RULESET_VERSION: RulesetVersion = RulesetVersion(6);
 
 // ── Source patterns (ADR-006) ─────────────────────────────────────────────────────────
 // Canonical dotted prefixes after import aliasing. `SensitiveFile` patterns are path
@@ -198,6 +200,20 @@ pub const SOURCE_PATTERNS: &[SourcePattern] = &[
     SourcePattern {
         kind: TaintSourceKind::NetworkResponse,
         pattern: "httpx",
+    },
+    // A download saved straight to disk (ADR-031): the call's result stands for the bytes
+    // it wrote, and the graph files them as a write into the destination path.
+    SourcePattern {
+        kind: TaintSourceKind::NetworkResponse,
+        pattern: "urllib.request.urlretrieve",
+    },
+    SourcePattern {
+        kind: TaintSourceKind::NetworkResponse,
+        pattern: "urllib.urlretrieve",
+    },
+    SourcePattern {
+        kind: TaintSourceKind::NetworkResponse,
+        pattern: "wget.download",
     },
     // DecodedLiteral and SuspiciousLiteral are structural, not name-based; the pattern field
     // names the matcher. `<fold>` is a `reach::DECODERS` call over constant input; the
@@ -418,6 +434,13 @@ pub const SINK_PATTERNS: &[SinkPattern] = &[
         kind: TaintSinkKind::CodeExecution,
         pattern: "pickle.loads",
         arg: Some(0),
+    },
+    // Structural, like `<write:…>`: data piped into an interpreter's standard input
+    // (ADR-031), `Popen([sys.executable, "-"], stdin=PIPE).communicate(code)`.
+    SinkPattern {
+        kind: TaintSinkKind::CodeExecution,
+        pattern: "<interpreter-stdin>",
+        arg: None,
     },
     // Persistence writes: file APIs whose *path* argument folds to a persistence location
     SinkPattern {

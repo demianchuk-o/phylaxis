@@ -149,7 +149,7 @@ fn collect_sites(
 /// from the phase roots (ADR-008). A payload started as `Thread(target=run)` from setup.py
 /// has no call edge from setup.py, so without this it would be scored as runtime code — and
 /// starting it in a thread is precisely how an install hook avoids blocking `pip`.
-const CALLBACK_RUNNERS: &[(&str, &str, usize)] = &[
+pub(crate) const CALLBACK_RUNNERS: &[(&str, &str, usize)] = &[
     ("threading.Thread", "target", 1),
     ("threading.Timer", "function", 1),
     ("multiprocessing.Process", "target", 1),

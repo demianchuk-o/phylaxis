@@ -80,23 +80,23 @@ source of truth; the tables below describe them.
 
 | | |
 |---|---|
-| Catches | The body of a network response passed to `exec`, `eval`, `compile`, `marshal.loads`+exec, or written to a file that is then executed. |
+| Catches | The body of a network response passed to `exec`, `eval`, `compile`, `marshal.loads`+exec, written to a file that is then executed, or piped into the standard input of an interpreter started without a script (`Popen([sys.executable, "-"]).communicate(body)`, `run(["bash", "-s"], input=body)`; ADR-031). Accessor methods of an HTTP response (`r.json()`, `r.iter_content()`) carry the body. |
 | Technique | Objective: **dropper** (second-stage download); execution: install dominant. |
 | Sources → sinks | `NetworkResponse` → `CodeExecution`. `Data`. |
 | Severity | Critical |
 | Expected FPs | Plugin systems that download and import extensions from a *configured* URL; self-updaters. Mitigation: `SuspiciousLiteral` on the URL raises confidence, a URL from configuration lowers it; benign fixture with a self-updater guarded by user confirmation still flags at Medium (documented accepted FP). |
-| Verification | `fixtures/malicious/urlopen_exec/` (positive); `fixtures/benign/download_data_file/` (negative: downloads a CSV and parses it, never executes). |
+| Verification | `fixtures/malicious/urlopen_exec/` (positive); `fixtures/benign/download_data_file/` (negative: downloads a CSV and parses it, never executes). ADR-031 twins: `json_field_exec` / `json_field_print`, `stdin_pipe_exec` / `stdin_pipe_fixed`. |
 
 ### PHX-DRP-002 — Download, write, execute
 
 | | |
 |---|---|
-| Catches | Network response written to disk, followed by `chmod`/`subprocess`/`os.system`/`os.startfile` on that path. The path must pass through the write (ADR-029); a response executed directly is PHX-DRP-001. |
+| Catches | Network response written to disk, followed by `chmod`/`subprocess`/`os.system`/`os.startfile` on that path. The path must pass through the write (ADR-029); a response executed directly is PHX-DRP-001. The write may be through a named handle, an unnamed one (`open(p, "wb").write(body)`), or a library that saves the download itself (`urllib.request.urlretrieve`, `wget.download`); the executed path must be the same variable, not merely the same file name written again (ADR-031). |
 | Technique | Objective: **dropper** (binary payload). |
 | Sources → sinks | `NetworkResponse` → (`FileWrite` as a transform) → `CodeExecution`. `Data`, path passes through the file-name symbol. |
 | Severity | Critical |
 | Expected FPs | Installers that fetch a platform-specific binary (`playwright install`-style). Documented accepted FP at Install phase; these are exactly what an auditor should look at. |
-| Verification | `fixtures/malicious/download_and_run/` (positive); `fixtures/benign/download_asset_no_exec/` (negative). |
+| Verification | `fixtures/malicious/download_and_run/` (positive); `fixtures/benign/download_asset_no_exec/` (negative). ADR-031 twins: `stream_chunks_run` / `stream_chunks_save`, `chained_write_run` / `chained_write_keep`, `urlretrieve_run` / `urlretrieve_dataset`. |
 
 ### PHX-DRP-003 — Shell one-liner or raw endpoint executed
 

@@ -28,6 +28,11 @@ by hand:
 - **Every credential-shaped literal is obviously fake**, and no real key material, token or
   hostname appears anywhere in the tree.
 
+**Antivirus.** Windows Defender quarantined the first two versions of `stdin_pipe_exec`
+(a download piped into an interpreter, in one file) and then kept the quarantined path locked.
+The fixture is split across `fetch.py` and `plugins.py` in a package named `plugin_host`, which
+it has left alone; the shape tested is the same.
+
 `malicious/tar_slip.tar.gz` is the one genuinely hostile artefact: it contains entries that
 escape the extraction root. It exists to be **rejected**, and must only ever be opened by
 code that validates entry paths before writing. See `docs/SAFETY.md`.
@@ -87,6 +92,13 @@ from the fixture side.
 | `download_cmd_exec/` | PHX-DRP-003 | the endpoint is one word of an f-string command line (ADR-028) |
 | `discord_webhook_beacon/` | PHX-EXF-003 | hostname → a factory-built Discord webhook (ADR-028) |
 | `token_regex_exfil/` | PHX-EXF-001 | env path → read → `re.findall` → `append` → post: the stealer chain (ADR-028) |
+| `json_field_exec/` | PHX-DRP-001 | `exec(r.json()["code"])`: a response accessor method (ADR-031) |
+| `stream_chunks_run/` | PHX-DRP-002 | `r.iter_content()` chunks written, the file then started (ADR-031) |
+| `chained_write_run/` | PHX-DRP-002 | `open(p, "w").write(body)` with no named handle, then run (ADR-031) |
+| `urlretrieve_run/` | PHX-DRP-002 | `urlretrieve(url, p)`, then `p` started through `cmd` (ADR-031) |
+| `stdin_pipe_exec/` | PHX-DRP-001 | a download piped into `python3 -` (`input=`), across two modules (ADR-031) |
+| `thread_args_exfil/` | PHX-EXF-001 | the environment passed to a thread through `args=` and posted (ADR-031) |
+| `configparser_exfil/` | PHX-EXF-002 | `cfg.read("~/.aws/credentials")`, one value posted (ADR-031) |
 | `setup_py_marker/` | — | safety fixture: writes `PHYLAXIS_EXECUTED` *if* executed. The marker's absence is the assertion. |
 
 ### benign
@@ -113,6 +125,13 @@ from the fixture side.
 | `template_url_git/` | PHX-DRP-003 | a URL *template* handed to `git`: templates match only inside a command line |
 | `discord_webhook_static/` | PHX-EXF-003 | the same webhook, sending fixed text |
 | `token_regex_local/` | PHX-EXF-001 | the same read/match/collect, counted locally; only a fixed request leaves |
+| `json_field_print/` | PHX-DRP-001 | the same JSON response, a field printed (ADR-031 twin) |
+| `stream_chunks_save/` | PHX-DRP-002 | the same streamed download, left on disk |
+| `chained_write_keep/` | PHX-DRP-002 | the same unnamed-handle write, file kept in a cache |
+| `urlretrieve_dataset/` | PHX-DRP-002 | the same `urlretrieve`, the file opened and counted |
+| `stdin_pipe_fixed/` | PHX-DRP-001 | the same interpreter on stdin, fed a fixed program |
+| `thread_args_status/` | PHX-EXF-001 | the same thread; the environment lands in an argument that is only printed |
+| `configparser_local/` | PHX-EXF-002 | the same file loaded the same way, only checked for a section |
 
 Two of the "benign" fixtures are **accepted false positives** rather than clean negatives, and
 `docs/RULES.md` says so. They are here to pin the accepted level, so that a change which

@@ -10,7 +10,7 @@ use phylaxis_core::{
     FlowEdgeKind, FlowNode, FlowNodeKind, QualifiedName, Span, SymbolId, SymbolKind, SymbolTable,
 };
 
-use crate::callgraph::FANOUT_HUB_MIN;
+use crate::callgraph::{CALLBACK_RUNNERS, FANOUT_HUB_MIN};
 use crate::error::GraphError;
 use crate::symbols::canonicalize;
 
@@ -132,6 +132,15 @@ const PRESERVING_METHODS: &[&str] = &[
     // A descriptor is the object under another name: `os.dup2(s.fileno(), 0)` duplicates
     // the socket itself.
     "fileno",
+    // An HTTP client's accessors on a response (ADR-031): `r.json()`, `r.iter_content()`
+    // in requests, `r.iter_bytes()` in httpx. The body's attributes (`r.text`, `r.content`)
+    // already carry it; these are the same body through a method.
+    "json",
+    "iter_content",
+    "iter_lines",
+    "iter_bytes",
+    "iter_text",
+    "iter_raw",
     "get",
     "pop",
     "items",
@@ -170,10 +179,51 @@ const RECEIVER_TAINTING_METHODS: &[&str] = &[
     "update",
 ];
 
+/// Methods that load what their argument names into the object (ADR-031):
+/// `cfg.read("~/.aws/credentials")` makes `cfg` hold that file, and `cfg.get(…)` hands it
+/// out again. Read as a receiver write like the list above, with one difference: on a file
+/// handle, `fh.read(n)` is a read, so these never count as a write into the opened file.
+/// `load` is left out: on an arbitrary object it means too many things.
+const RECEIVER_LOADING_METHODS: &[&str] = &["read", "read_file", "read_string", "read_dict"];
+
 /// Calls whose result is a handle on the path in their first argument. Data written into
 /// such a handle lands in that path, so it taints the path's variable too:
 /// `with open(target, "wb") as fh: fh.write(payload)` makes `target` carry `payload`.
 const OPENERS: &[&str] = &["open", "io.open"];
+
+/// Calls that start a process, whose first argument is the command line.
+const PROCESS_STARTERS: &[&str] = &[
+    "subprocess.Popen",
+    "subprocess.run",
+    "subprocess.call",
+    "subprocess.check_call",
+    "subprocess.check_output",
+];
+
+/// Programs that read a script from standard input when given no script argument.
+const INTERPRETERS: &[&str] = &[
+    "python",
+    "pythonw",
+    "py",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "powershell",
+    "pwsh",
+    "node",
+    "perl",
+    "ruby",
+];
+
+/// Calls that save a download straight to a path, with the parameter naming that path
+/// (ADR-031): `urlretrieve(url, path)` is a response written into `path`, the same two
+/// legs as `fh.write(r.read())` on a handle opened on `path`, without a handle in sight.
+const DOWNLOADERS: &[(&str, usize, &str)] = &[
+    ("urllib.request.urlretrieve", 1, "filename"),
+    ("urllib.urlretrieve", 1, "filename"),
+    ("wget.download", 1, "out"),
+];
 
 /// How deep the walk follows nested syntax before it stops. WHY a bound: the parser keeps
 /// every node of a hostile file, and this walk recurses, so ten thousand nested brackets
@@ -317,6 +367,9 @@ struct PendingReceiverWrite {
     owner: SymbolId,
     name: String,
     def: NodeIndex,
+    /// Whether, on a handle bound from `open`, this is a write into the file. False for the
+    /// loading methods (`RECEIVER_LOADING_METHODS`).
+    into_file: bool,
 }
 
 /// One `open(…)` a handle was bound from: its call result, and the path's variable when the
@@ -862,18 +915,68 @@ impl Walker<'_> {
                 .map(|(_, c)| *c)
         };
         if let Some(confidence) = external.filter(|_| {
-            method
-                .as_deref()
-                .is_some_and(|m| RECEIVER_TAINTING_METHODS.contains(&m))
+            method.as_deref().is_some_and(|m| {
+                RECEIVER_TAINTING_METHODS.contains(&m) || RECEIVER_LOADING_METHODS.contains(&m)
+            })
         }) {
+            let filed = self.receiver_writes.len();
             self.receiver_write(
                 ast,
                 callee,
                 owner,
                 &label,
+                &receiver,
                 &all_actuals[receiver.len()..],
                 confidence,
             );
+            // A loading method fills the object; it is never a write into a file.
+            if method
+                .as_deref()
+                .is_some_and(|m| RECEIVER_LOADING_METHODS.contains(&m))
+            {
+                for write in &mut self.receiver_writes[filed..] {
+                    write.into_file = false;
+                }
+            }
+        }
+
+        self.record_stdin(
+            ast,
+            id,
+            callee,
+            owner,
+            result,
+            &label,
+            method.as_deref(),
+            &receiver,
+            &positional,
+            &keyword,
+        );
+
+        self.wire_callback(ast, id, result, &label, &positional, &keyword);
+
+        if let Some(&(_, index, keyword_name)) = DOWNLOADERS.iter().find(|(n, ..)| *n == label) {
+            let destination = positional
+                .get(index)
+                .map(|(s, v)| (*s, v.clone()))
+                .or_else(|| {
+                    keyword
+                        .iter()
+                        .find(|(k, ..)| k == keyword_name)
+                        .map(|(_, s, v)| (*s, v.clone()))
+                });
+            if let Some(destination) = destination {
+                self.download_write(
+                    ast,
+                    id,
+                    owner,
+                    result,
+                    &label,
+                    destination,
+                    index,
+                    keyword_name,
+                );
+            }
         }
 
         if !package_targets.is_empty() {
@@ -889,15 +992,338 @@ impl Walker<'_> {
         vec![result]
     }
 
+    /// `Thread(target=f, args=(x,))`, `pool.submit(f, x)`, `atexit.register(f, x)`: the
+    /// runner calls `f` with `x`, so `x` is bound to `f`'s parameters as if `f(x)` were
+    /// written (ADR-031). The call graph already has the call edge (ADR-008's callback
+    /// runners); this is its data side. How the arguments travel depends on the runner:
+    /// `args=` and `kwargs=` for the thread and process constructors, the arguments after the
+    /// callable for the others, and one item of each iterable for `map`. A runner that passes
+    /// nothing of the caller's (`signal.signal`) gets no edges.
+    fn wire_callback(
+        &mut self,
+        ast: &Ast,
+        call: AstNodeId,
+        result: NodeIndex,
+        label: &str,
+        positional: &[(Span, Vec<NodeIndex>)],
+        keyword: &[(String, Span, Vec<NodeIndex>)],
+    ) {
+        let Some(&(runner, keyword_name, position)) =
+            CALLBACK_RUNNERS.iter().find(|(r, ..)| *r == label)
+        else {
+            return;
+        };
+        if runner == "signal.signal" {
+            return;
+        }
+        let Some(items) = ast
+            .child_by_field(call, "arguments")
+            .and_then(|a| ast.get(a))
+            .map(|a| a.children.clone())
+        else {
+            return;
+        };
+        let is_keyword =
+            |i: &AstNodeId| ast.get(*i).map(|n| n.kind) == Some(AstKind::KeywordArgument);
+        let by_keyword = items.iter().copied().find(|i| {
+            is_keyword(i)
+                && ast.child_by_field(*i, "name").and_then(|k| ast.text_of(k)) == Some(keyword_name)
+        });
+        let callback = match by_keyword {
+            Some(kw) => ast.child_by_field(kw, "value"),
+            None => items
+                .iter()
+                .copied()
+                .filter(|i| !is_keyword(i) && !ast.text_of(*i).is_some_and(|t| t.starts_with('*')))
+                .nth(position),
+        };
+        let Some(callback) = callback else { return };
+        let targets: Vec<(SymbolId, Confidence)> = self
+            .targets_of_site
+            .get(&(ast.file, callback))
+            .into_iter()
+            .flatten()
+            .filter(|(t, _)| self.calls.graph[*t].kind == CallNodeKind::Definition)
+            .map(|(t, c)| (self.calls.graph[*t].symbol, *c))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let trailing = if by_keyword.is_some() {
+            positional
+        } else {
+            positional.get(position + 1..).unwrap_or_default()
+        };
+        let (mut passed, mut splat) = (Vec::new(), Vec::new());
+        if matches!(
+            runner,
+            "threading.Thread" | "threading.Timer" | "multiprocessing.Process"
+        ) {
+            for (name, span, values) in keyword {
+                match name.as_str() {
+                    "args" => {
+                        let value = items
+                            .iter()
+                            .copied()
+                            .filter(|i| is_keyword(i))
+                            .find(|i| {
+                                ast.child_by_field(*i, "name").and_then(|k| ast.text_of(k))
+                                    == Some("args")
+                            })
+                            .and_then(|i| ast.child_by_field(i, "value"));
+                        match value.and_then(|v| ast.get(v)) {
+                            Some(n) if matches!(n.kind, AstKind::Tuple | AstKind::List) => {
+                                // One slot per element, by where each value node sits.
+                                for element in n.children.clone() {
+                                    let Some(e) = ast.get(element) else { continue };
+                                    let inside: Vec<NodeIndex> = values
+                                        .iter()
+                                        .copied()
+                                        .filter(|v| {
+                                            let s = self.dfg.graph[*v].span;
+                                            s.start_byte >= e.span.start_byte
+                                                && s.end_byte <= e.span.end_byte
+                                        })
+                                        .collect();
+                                    passed.push((e.span, inside));
+                                }
+                            }
+                            _ => splat.push((*span, values.clone())),
+                        }
+                    }
+                    "kwargs" => splat.push((*span, values.clone())),
+                    _ => {}
+                }
+            }
+        } else if runner.ends_with(".map") {
+            splat.extend(trailing.iter().cloned());
+        } else {
+            passed.extend(trailing.iter().cloned());
+        }
+        if passed.iter().chain(&splat).all(|(_, v)| v.is_empty()) {
+            return;
+        }
+        self.package_calls.push(PendingCall {
+            result,
+            receiver: Vec::new(),
+            positional: passed,
+            keyword: Vec::new(),
+            splat,
+            targets,
+        });
+    }
+
+    /// Interpreter processes and the data sent to process stdin (ADR-031). Three shapes:
+    /// `run(interp, input=x)`, `p.communicate(x)` / `p.communicate(input=x)`, and
+    /// `p.stdin.write(x)`. Whether `p` is an interpreter is settled in `reach::find_sinks`,
+    /// by tracing the receiver back to a call recorded in `interpreters` here.
+    #[allow(clippy::too_many_arguments)]
+    fn record_stdin(
+        &mut self,
+        ast: &Ast,
+        call: AstNodeId,
+        callee: Option<AstNodeId>,
+        owner: SymbolId,
+        result: NodeIndex,
+        label: &str,
+        method: Option<&str>,
+        receiver: &[NodeIndex],
+        positional: &[(Span, Vec<NodeIndex>)],
+        keyword: &[(String, Span, Vec<NodeIndex>)],
+    ) {
+        let input_keyword = || {
+            keyword
+                .iter()
+                .find(|(k, ..)| k == "input")
+                .map(|(_, s, v)| (*s, v.clone()))
+        };
+        let writes_to_stdin = || {
+            callee
+                .and_then(|c| ast.child_by_field(c, "object"))
+                .filter(|o| ast.get(*o).map(|n| n.kind) == Some(AstKind::Attribute))
+                .and_then(|o| ast.child_by_field(o, "attribute"))
+                .and_then(|a| ast.text_of(a))
+                == Some("stdin")
+        };
+        let (input, through) = if PROCESS_STARTERS.contains(&label) {
+            if !self.starts_stdin_interpreter(ast, call) {
+                return;
+            }
+            self.dfg.interpreters.insert(result);
+            (input_keyword(), vec![result])
+        } else if method == Some("communicate") {
+            let input = positional
+                .first()
+                .map(|(s, v)| (*s, v.clone()))
+                .or_else(input_keyword);
+            (input, receiver.to_vec())
+        } else if matches!(method, Some("write" | "writelines")) && writes_to_stdin() {
+            (
+                positional.first().map(|(s, v)| (*s, v.clone())),
+                receiver.to_vec(),
+            )
+        } else {
+            return;
+        };
+        let Some((span, values)) = input else { return };
+        if values.is_empty() || through.is_empty() {
+            return;
+        }
+        let node = self.node(
+            ast,
+            call,
+            FlowNodeKind::Parameter,
+            owner,
+            None,
+            "<interpreter stdin>".to_owned(),
+        );
+        for v in values {
+            self.edge(v, node, FlowEdgeKind::Argument, span, Confidence::Resolved);
+        }
+        if self.guards > 0 {
+            self.dfg.conditional.insert(node);
+        }
+        self.dfg.stdin_writes.push((node, through));
+    }
+
+    /// Whether a process call's command line is an interpreter given no script: the program
+    /// is `sys.executable` or a known interpreter, and every further word is a flag other than
+    /// one that takes the program from the command line instead (`-c`, `-m`, `-e`). Only a
+    /// command written in place is read; one built elsewhere and passed by name is not.
+    fn starts_stdin_interpreter(&self, ast: &Ast, call: AstNodeId) -> bool {
+        let Some(first) = ast
+            .child_by_field(call, "arguments")
+            .and_then(|a| ast.get(a))
+            .and_then(|a| a.children.first().copied())
+        else {
+            return false;
+        };
+        let Some(node) = ast.get(first) else {
+            return false;
+        };
+        let words: Vec<Option<String>> = match node.kind {
+            AstKind::List | AstKind::Tuple => node
+                .children
+                .iter()
+                .map(|c| match ast.get(*c).map(|n| n.kind) {
+                    Some(AstKind::String) => ast.text_of(*c).and_then(crate::symbols::str_literal),
+                    Some(AstKind::Attribute | AstKind::Identifier) => {
+                        let text = ast.text_of(*c).unwrap_or_default();
+                        (canonicalize(self.table, ast.file, text).as_str() == "sys.executable")
+                            .then(|| "python".to_owned())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            AstKind::String => ast
+                .text_of(first)
+                .and_then(crate::symbols::str_literal)
+                .map(|t| t.split_whitespace().map(|w| Some(w.to_owned())).collect())
+                .unwrap_or_default(),
+            _ => return false,
+        };
+        let Some(Some(program)) = words.first() else {
+            return false;
+        };
+        let base = program
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let base = base.strip_suffix(".exe").unwrap_or(&base);
+        let interpreter = INTERPRETERS.iter().any(|i| {
+            base.strip_prefix(i)
+                .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        });
+        interpreter
+            && words[1..].iter().all(|w| {
+                w.as_deref().is_some_and(|w| {
+                    w.starts_with('-') && !matches!(w, "-c" | "-m" | "-e" | "-Command" | "-File")
+                })
+            })
+    }
+
+    /// `urlretrieve(url, dest)`: the call's result (a `NetworkResponse` source by the
+    /// catalogue) is written into `dest`. Filed exactly as a write through a handle opened on
+    /// `dest`: a pending receiver write on a name no source can spell, whose `Opened` entry is
+    /// a node fed from the destination's value, so `<write:…>` sinks see its literal parts and
+    /// `resolve_receiver_writes` makes a plain-name destination carry the download.
+    #[allow(clippy::too_many_arguments)]
+    fn download_write(
+        &mut self,
+        ast: &Ast,
+        call: AstNodeId,
+        owner: SymbolId,
+        result: NodeIndex,
+        label: &str,
+        (span, values): (Span, Vec<NodeIndex>),
+        index: usize,
+        keyword_name: &str,
+    ) {
+        let destination = self.node(
+            ast,
+            call,
+            FlowNodeKind::Use,
+            owner,
+            None,
+            "<download destination>".to_owned(),
+        );
+        for v in values {
+            self.edge(
+                v,
+                destination,
+                FlowEdgeKind::Argument,
+                span,
+                Confidence::Resolved,
+            );
+        }
+        let start = ast.get(call).map(|n| n.span.start_byte).unwrap_or_default();
+        let handle = format!("<download@{}:{start}>", ast.file.0);
+        let def = self.node(
+            ast,
+            call,
+            FlowNodeKind::Definition,
+            owner,
+            None,
+            handle.clone(),
+        );
+        self.edge(
+            result,
+            def,
+            FlowEdgeKind::Transform {
+                callee: QualifiedName::new(label),
+                obfuscating: false,
+            },
+            span,
+            Confidence::Resolved,
+        );
+        let path = destination_name(ast, call, index, keyword_name);
+        self.opened_from
+            .entry((owner, handle.clone()))
+            .or_default()
+            .push(Opened {
+                path,
+                call: destination,
+            });
+        self.receiver_writes.push(PendingReceiverWrite {
+            owner,
+            name: handle,
+            def,
+            into_file: true,
+        });
+    }
+
     /// `obj.write(args)` on a plain variable `obj`: a new definition of `obj` fed from the
     /// arguments. Filed as pending, because the scope that owns `obj` and the `open` it came
     /// from are only known for certain once the whole package has been walked.
+    #[allow(clippy::too_many_arguments)]
     fn receiver_write(
         &mut self,
         ast: &Ast,
         callee: Option<AstNodeId>,
         owner: SymbolId,
         label: &str,
+        receiver: &[NodeIndex],
         arguments: &[(Span, NodeIndex)],
         confidence: Confidence,
     ) {
@@ -921,10 +1347,31 @@ impl Walker<'_> {
                 _ => return,
             }
         }
-        if ast.get(object).map(|n| n.kind) != Some(AstKind::Identifier) {
+        // `open(p, "w").write(data)` (ADR-031): the handle is the call's result and has no
+        // name. It is given one that no source can spell, bound from that `open` the way
+        // `record_opened` binds `fh`, so the write resolves into `p` like the `with` form.
+        let mut unnamed = None;
+        if ast.get(object).map(|n| n.kind) == Some(AstKind::Call) {
+            let (Some(path), [call]) = (self.opened_path(ast, object), receiver) else {
+                return;
+            };
+            let start = ast
+                .get(object)
+                .map(|n| n.span.start_byte)
+                .unwrap_or_default();
+            let handle = format!("<open@{}:{start}>", ast.file.0);
+            self.opened_from
+                .entry((owner, handle.clone()))
+                .or_default()
+                .push(Opened { path, call: *call });
+            unnamed = Some(handle);
+        } else if ast.get(object).map(|n| n.kind) != Some(AstKind::Identifier) {
             return;
         }
-        let name = ast.text_of(object).unwrap_or_default().to_owned();
+        let name = match unnamed {
+            Some(handle) => handle,
+            None => ast.text_of(object).unwrap_or_default().to_owned(),
+        };
         if self.is_imported(ast.file, &name) {
             return;
         }
@@ -948,8 +1395,12 @@ impl Walker<'_> {
                 confidence,
             );
         }
-        self.receiver_writes
-            .push(PendingReceiverWrite { owner, name, def });
+        self.receiver_writes.push(PendingReceiverWrite {
+            owner,
+            name,
+            def,
+            into_file: true,
+        });
     }
 
     /// Remembers that the plain name `target` was bound from `open(…)`: the call's result
@@ -973,31 +1424,39 @@ impl Walker<'_> {
         {
             return;
         }
-        let Some(function) = ast.child_by_field(value, "function") else {
+        let Some(path) = self.opened_path(ast, value) else {
             return;
         };
-        let callee = canonicalize(
-            self.table,
-            ast.file,
-            ast.text_of(function).unwrap_or_default(),
-        );
-        if !OPENERS.contains(&callee.as_str()) {
-            return;
-        }
-        let first = ast
-            .child_by_field(value, "arguments")
-            .and_then(|a| ast.get(a))
-            .and_then(|a| a.children.first().copied());
-        let path = first
-            .filter(|f| ast.get(*f).map(|n| n.kind) == Some(AstKind::Identifier))
-            .and_then(|f| ast.text_of(f))
-            .map(str::to_owned);
         let [call] = result else { return };
         let handle = ast.text_of(target).unwrap_or_default().to_owned();
         self.opened_from
             .entry((owner, handle))
             .or_default()
             .push(Opened { path, call: *call });
+    }
+
+    /// When `call` is `open(…)` (or another opener): `Some` of the path's variable name, if
+    /// the path is a plain name. `None` when it is not an opener at all.
+    fn opened_path(&self, ast: &Ast, call: AstNodeId) -> Option<Option<String>> {
+        let function = ast.child_by_field(call, "function")?;
+        let callee = canonicalize(
+            self.table,
+            ast.file,
+            ast.text_of(function).unwrap_or_default(),
+        );
+        if !OPENERS.contains(&callee.as_str()) {
+            return None;
+        }
+        let first = ast
+            .child_by_field(call, "arguments")
+            .and_then(|a| ast.get(a))
+            .and_then(|a| a.children.first().copied());
+        Some(
+            first
+                .filter(|f| ast.get(*f).map(|n| n.kind) == Some(AstKind::Identifier))
+                .and_then(|f| ast.text_of(f))
+                .map(str::to_owned),
+        )
     }
 
     /// The nearest scope, from `owner` outwards, that defines `name`; `owner` if none does.
@@ -1027,6 +1486,9 @@ impl Walker<'_> {
                 .entry((scope, write.name))
                 .or_default()
                 .push(write.def);
+            if !write.into_file {
+                continue;
+            }
             for Opened { path, call } in opened {
                 self.dfg.file_writes.push((write.def, call));
                 let Some(path) = path else { continue };
@@ -1486,7 +1948,28 @@ enum Slot {
     Return,
 }
 
-/// Whether a string node contains an f-string interpolation anywhere below it.
+/// The variable name of a call's argument at `index`, or of its keyword `name`, when that
+/// argument is a plain name.
+fn destination_name(ast: &Ast, call: AstNodeId, index: usize, name: &str) -> Option<String> {
+    let arguments = ast.child_by_field(call, "arguments")?;
+    let items = ast.get(arguments)?.children.clone();
+    let positional = items
+        .iter()
+        .filter(|i| ast.get(**i).map(|n| n.kind) != Some(AstKind::KeywordArgument))
+        .nth(index)
+        .copied();
+    let value = positional.or_else(|| {
+        items.iter().find_map(|i| {
+            let n = ast.get(*i)?;
+            (n.kind == AstKind::KeywordArgument
+                && ast.child_by_field(*i, "name").and_then(|k| ast.text_of(k)) == Some(name))
+            .then(|| ast.child_by_field(*i, "value"))
+            .flatten()
+        })
+    })?;
+    (ast.get(value)?.kind == AstKind::Identifier).then(|| ast.text_of(value).map(str::to_owned))?
+}
+
 /// The fixed text of an interpolated string, prefix and quotes removed, each `{…}` replaced
 /// by `{}`: `f'curl -L https://h/a -o "{out}"'` gives `curl -L https://h/a -o "{}"`. `None`
 /// when nothing but holes is left, since an empty template matches nothing.
@@ -1508,6 +1991,7 @@ fn fstring_template(ast: &Ast, id: AstNodeId) -> Option<String> {
     (!body.replace("{}", "").trim().is_empty()).then(|| body.to_owned())
 }
 
+/// Whether a string node contains an f-string interpolation anywhere below it.
 fn has_interpolation(ast: &Ast, id: AstNodeId) -> bool {
     let Some(node) = ast.get(id) else {
         return false;
@@ -1634,6 +2118,26 @@ mod tests {
         })
     }
 
+    // ADR-031 (G3): the handle need not have a name. `open(t, 'w').write(s)` writes into `t`
+    // exactly as the `with` form does.
+    #[test]
+    fn write_through_an_unnamed_handle_taints_the_opened_path() {
+        let g = graph_from_sources(&[(
+            "pkg/a.py",
+            "import os
+t = 'x'
+open(t, 'w').write(os.environ['S'])
+r = t
+",
+        )]);
+        assert!(reaches(
+            &g.dfg.graph,
+            "os.environ",
+            (FlowNodeKind::Definition, "r")
+        ));
+        assert!(!g.dfg.file_writes.is_empty());
+    }
+
     // Stateful objects (ADR-006): bytes written through a handle land in the path it was
     // opened on, in both binding forms, and whichever order the statements come in.
     #[test]
@@ -1708,12 +2212,67 @@ def connect():
         }
     }
 
+    // ADR-031 (G5): `cfg.read(path)` loads the file into `cfg`; `fh.read(n)` on an opened
+    // handle is still not a write into that file.
+    #[test]
+    fn a_loading_method_taints_its_receiver_but_is_not_a_file_write() {
+        let g = graph_from_sources(&[(
+            "pkg/a.py",
+            "import configparser, os\ncfg = configparser.ConfigParser()\ncfg.read(os.environ['P'])\nx = cfg.get('a', 'b')\n",
+        )]);
+        assert!(reaches(
+            &g.dfg.graph,
+            "os.environ",
+            (FlowNodeKind::Definition, "x")
+        ));
+        let g = graph_from_sources(&[(
+            "pkg/a.py",
+            "import os\nn = int(os.environ['N'])\nwith open('f', 'rb') as fh:\n    data = fh.read(n)\n",
+        )]);
+        assert!(g.dfg.file_writes.is_empty());
+    }
+
     // The list is closed: a method not on it does not taint its receiver.
     #[test]
     fn other_methods_do_not_taint_their_receiver() {
         let g = graph_from_sources(&[(
             "pkg/a.py",
             "import logging, os\nlog = logging.getLogger()\nlog.info(os.environ['S'])\nx = log\n",
+        )]);
+        assert!(!reaches(
+            &g.dfg.graph,
+            "os.environ",
+            (FlowNodeKind::Definition, "x")
+        ));
+    }
+
+    // ADR-031 (G2): a response accessor carries the response, like `read` carries a handle.
+    #[test]
+    fn a_response_accessor_carries_the_response() {
+        let g = graph_from_sources(&[(
+            "pkg/a.py",
+            "import requests
+r = requests.get('https://x.invalid')
+j = r.json()
+",
+        )]);
+        assert!(reaches(
+            &g.dfg.graph,
+            "requests.get",
+            (FlowNodeKind::Definition, "j")
+        ));
+    }
+
+    // The arguments of a method outside the list still go nowhere: ADR-031 measured the
+    // general receiver-to-result edge and rejected it (long chains through large libraries).
+    #[test]
+    fn a_method_result_does_not_carry_its_arguments() {
+        let g = graph_from_sources(&[(
+            "pkg/a.py",
+            "import logging, os
+log = logging.getLogger()
+x = log.info(os.environ['S'])
+",
         )]);
         assert!(!reaches(
             &g.dfg.graph,

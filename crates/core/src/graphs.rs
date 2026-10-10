@@ -179,6 +179,15 @@ pub struct DataFlowGraph {
     /// environment (OS, platform, hostname, user, environment variables, time): Backstabber's
     /// conditional execution. A label on the path, never part of the predicate (ADR-030).
     pub conditional: BTreeSet<NodeIndex>,
+    /// Call results of processes started on an interpreter that reads its program from
+    /// standard input: `Popen([sys.executable, "-"], …)`, `run(["bash", "-s"], …)` (ADR-031).
+    pub interpreters: BTreeSet<NodeIndex>,
+    /// Data sent to some process's standard input, as `(input, process)`: the node the data
+    /// flows into, and the receiver nodes it was sent through (`p` in `p.communicate(x)`,
+    /// `p.stdin` in `p.stdin.write(x)`, the call itself for `run(…, input=x)`). Which process
+    /// that is, is found by tracing the receiver back; it is a code-execution sink when the
+    /// trace reaches one of `interpreters` (ADR-031).
+    pub stdin_writes: Vec<(NodeIndex, Vec<NodeIndex>)>,
 }
 
 /// [8] Everything the rule engine queries for one distribution.

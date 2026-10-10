@@ -1397,6 +1397,107 @@ verdict, risk or finding set changes.
 
 ---
 
+## ADR-031 — Paths the graph dropped, and a holdout nobody has read (ruleset 6)
+
+**Date:** 2026-10-10. **Status:** accepted.
+
+### Context
+
+On the Backstabber split's unseen packages (`new`), 561 packages have a finding under file
+co-occurrence (configuration A) and none under reachability (D). A sample of 30, weighted to
+247 of them, was read in memory and each suspected break reproduced as a minimal inert probe.
+About 45 % (by weight) were paths that existed in the code and that the graph did not build;
+the rest were behaviour outside the vocabulary, deliberate policy (unknown external calls drop
+taint, ADR-006), or a co-occurrence hit unrelated to what the package does. This ADR closes the
+first group without adding a single source or sink name for a new kind of behaviour: each fix
+is a way data already moves in Python that the graph did not model.
+
+### Choice
+
+Each fix has a twin fixture pair (malicious, and a benign twin keeping the vocabulary and the
+network call but not the path) in `e2e_rules::adr_031_shapes_fire_and_their_twins_do_not`, and
+a graph test. A fix was kept only if it moved no benign package across a threshold.
+
+1. **Response accessors carry the response (G2).** `json`, `iter_content`, `iter_lines`,
+   `iter_bytes`, `iter_text`, `iter_raw` join the closed list of methods whose result carries
+   the receiver (`PRESERVING_METHODS`). `exec(r.text)` was found; `exec(r.json()["code"])` and
+   `for chunk in r.iter_content(): fh.write(chunk)` were not.
+2. **A write through an unnamed handle (G3).** `open(p, "w").write(body)` is filed like
+   `fh.write(body)` on `fh = open(p, "w")`: the call result gets a name no source can spell and
+   resolves into `p`.
+3. **A library that saves a download (G10).** `urllib.request.urlretrieve(url, path)`,
+   `urllib.urlretrieve` and `wget.download(url, out)` are `NetworkResponse` sources whose result
+   is written into the destination path, through the same file-write record as a handle, so
+   PHX-DRP-002's two legs join through it.
+4. **An interpreter's standard input is an execution sink (G11).** A process started on
+   `sys.executable` or a known interpreter with no script argument (every further word a flag
+   other than `-c`, `-m`, `-e`) reads its program from stdin. Data sent there — `run(…,
+   input=x)`, `p.communicate(x)`, `p.stdin.write(x)` — reaches the structural sink
+   `<interpreter-stdin>`, found by tracing the receiver back to the process call. Only a
+   command line written in place is read.
+5. **Callback runners pass arguments (G4).** ADR-008's runners already add the call edge
+   `Thread(target=f)` → `f`; now `args=(…)` binds element by element to `f`'s parameters,
+   `kwargs=` and `map`'s iterables to any of them, and `submit(f, x)` / `atexit.register(f, x)` /
+   `asyncio.to_thread(f, x)` pass their trailing arguments. `signal.signal` passes nothing.
+6. **Loading methods fill their receiver (G5).** `read`, `read_file`, `read_string`,
+   `read_dict` taint the object they are called on from their arguments, as
+   `RECEIVER_TAINTING_METHODS` do: `cfg.read("~/.aws/credentials")` makes `cfg` hold the file.
+   On a handle from `open`, they are never a write into the file (`fh.read(n)` is a read).
+### Measured before choosing
+
+Each step was measured on the 980 benign packages of the test split (false positives at
+τ = 0.40) and on the 561 gap packages (recovered at τ = 0.40), cumulatively, against ruleset 5
+(207 benign packages flagged):
+
+| step | benign flagged | gap recovered |
+|---|---|---|
+| G2 as a general rule (rejected, see below) | 212 (+5) | 32 |
+| G2 as a closed list | 207 | 28 |
+| + G3 | 207 | 41 |
+| + G10, G11, G4 | 207 | 95 |
+| + G5 (**ruleset 6**) | **207** | **100** |
+| + file identity by name (rejected, see below) | 208 (+1) | 107 |
+
+At τ = 0.70 the benign count stayed at 51 through ruleset 6 (52 with file identity), and the
+gap packages recovered were 53. The development split's benign rows are unchanged.
+
+### Alternatives considered
+
+- **G2 as a general rule:** every method called on a value returns something derived from the
+  value. It is the principle, and in ADR-007's direction; measured, it added five benign
+  false positives (`dnspython`, `mako`, `execnet`, `parso`, `langchain-anthropic`, all through
+  30-plus-step chains in large libraries) for four more recovered packages. Rejected for the
+  closed list.
+- **Make unknown external calls preserving (G6).** Would recover the AES- and zlib-wrapped
+  payloads, and would undo ADR-006's precision choice for every call in every package. Not
+  done; named in the threats to validity.
+- **Copy and archive channels** (`shutil.copy`, zip and tar extraction), **event-bus dispatch**
+  and **higher-order calls** (a source called through a parameter, G8). Each is a real gap in
+  the sample; each needs a model of its own (a file-to-file edge, a dispatcher table, function
+  values), and none was common enough in the sample to justify it now.
+- **File identity by name (G1, G12).** A file written on a path built from the literal
+  `"x.bin"` is the file every equal literal names: an `Ambiguous` edge from the write to each,
+  so `Popen(["x.bin"])` after `open("x.bin", "wb").write(body)` carries `body`. Measured: seven
+  more gap packages, one more benign false positive at each threshold, and higher risk on
+  eleven benign packages, mostly through PHX-SAB-001. The edge makes a file *name* carry the
+  file's *content*, which is right for executing the file and wrong for deleting or naming it.
+  Rejected for now. The sound version feeds only PHX-DRP-002's second leg (write → execute)
+  and needs the leg search to take extra edges. That is further work.
+- **`load` as a loading method.** On an arbitrary object it means too many things.
+
+### Consequences
+
+`RULESET_VERSION` 5 → 6. The fixes were found by reading Backstabber's packages, so the
+`bkc` split joins the test split as post-hoc for ruleset 6. The honest measurement is a third
+collection nobody has read: `fresh`, 1 870 malicious sdists from `pypi_malregistry` (Guo et
+al., 2023) at commit `5f2592d`, sampled (one version per name, seed 20261010) from the (name,
+version) pairs absent from both earlier collections and deduplicated by content against them
+(`eval/manifest_fresh.py`). It was drawn and frozen before ruleset 6 was built, and nothing was
+scanned on it before then. Datadog had added no PyPI samples since the manifest commit, which
+is why the holdout is not Datadog's.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
