@@ -197,7 +197,7 @@ def metrics(rows: list[dict]) -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--split", choices=["dev", "test", "bkc"], default="dev")
+    p.add_argument("--split", choices=["dev", "test", "bkc", "fresh"], default="dev")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 1, help="worker processes at a time")
     p.add_argument("--timeout", type=float, default=300.0, help="seconds per sample")
     p.add_argument("--tag", default="", help="suffix for the result files, e.g. -r3 for another ruleset")
@@ -211,8 +211,9 @@ def main() -> None:
         print(json.dumps(scan_entry(json.loads(sys.stdin.read()), args.worker)))
         return
 
-    # ADR-026: the Backstabber split has its own manifest, kept with the dataset.
-    manifest = DATA / "bkc-manifest.json" if args.split == "bkc" else HERE / "manifest.json"
+    # ADR-026 / ADR-031: the Backstabber and holdout splits have their own manifests, kept
+    # with the dataset.
+    manifest = {"bkc": DATA / "bkc-manifest.json", "fresh": DATA / "fresh-manifest.json"}.get(args.split, HERE / "manifest.json")
     entries = [e for e in json.loads(manifest.read_text(encoding="utf-8"))["entries"] if e.get("split") == args.split]
     (DATA / "results").mkdir(parents=True, exist_ok=True)
     for m in ("ABCD" if args.all_modes else args.mode):

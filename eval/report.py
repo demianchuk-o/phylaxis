@@ -251,6 +251,60 @@ def r6(runs: list[tuple[str, str]], bkc: list[dict] | None) -> str:
     return "\n".join(out)
 
 
+def r7(runs: list[tuple[str, str]], fresh_doc: dict | None) -> str:
+    if fresh_doc is None:
+        return ""
+    ids = {e["id"] for e in fresh_doc["entries"] if e.get("split") == "fresh"}
+    src = fresh_doc["source"]
+    out = ["## R7 Holdout split `fresh` (ADR-031): recall only", "",
+           f"{len(ids)} malicious sdists from `{src['repo']}` at `{src['commit'][:10]}`, drawn before "
+           "ruleset 6 was built from the (name, version) pairs absent from Datadog and Backstabber, "
+           "one version per name, deduplicated by content against both. No ruleset was shaped by "
+           "it, so every row here is unseen data. False positives are not measurable on an "
+           "all-malicious set; for them see R1 (ruleset 6 left the benign test rows at τ = 0.40 "
+           "unchanged, ADR-031).", "",
+           "| tool / config | τ | recall | N | errors |", "|---|---|---|---|---|"]
+
+    def line(label, tau, rs, flag):
+        rs = [r for r in rs if r["id"] in ids]
+        rec = sum(map(flag, rs)) / len(rs) if rs else 0.0
+        return f"| {label} | {tau} | {fmt(rec)} | {len(rs)} | {sum(map(errored, rs))} |"
+
+    for tag, label in runs:
+        for m, name in MODES.items():
+            rs = rows(f"fresh-{m}{tag}")
+            if rs is not None:
+                for tau in THRESHOLDS:
+                    out.append(line(f"{name} ({label})", f"{tau:.2f}", rs, phylaxis_flag(tau)))
+    g = rows("fresh-guarddog")
+    if g:
+        out.append(line("GuardDog", "any rule", g, guarddog_flag))
+    a = rows("fresh-aura")
+    if a:
+        out.append(line("Aura", "score > 0", a, aura_flag(0)))
+    return "\n".join(out)
+
+
+def r8(runs: list[tuple[str, str]]) -> str:
+    docs = [(label, RESULTS / f"bkc-attribution{tag}.json") for tag, label in runs]
+    docs = [(label, json.loads(p.read_text(encoding="utf-8"))["summary"]) for label, p in docs if p.is_file()]
+    if not docs:
+        return ""
+    out = ["## R8 Attributed recall, Backstabber `new` (ADR-031)", "",
+           "A detection is attributed when the package is flagged and some finding has a step in the "
+           "file Backstabber annotates as holding the malicious snippet (`eval/attribution.py`). "
+           "Annotations that name no `.py` file of the archive are left out. File granularity is "
+           "coarse: most annotated packages keep the payload in `setup.py` or a single file.", "",
+           "| config | τ | N | recall | attributed recall |", "|---|---|---|---|---|"]
+    for label, summ in docs:
+        for tau, tau_value in (("primary", 0.40), ("strict", 0.70)):
+            for m, name in MODES.items():
+                v = summ.get(f"new/{tau}/{m}")
+                if v:
+                    out.append(f"| {name} ({label}) | {tau_value:.2f} | {v['n']} | {fmt(v['recall'])} | {fmt(v['attributed'])} |")
+    return "\n".join(out)
+
+
 def os_name() -> str:
     """Windows 11 reports release "10"; the build number tells them apart (22000 and up)."""
     if platform.system() == "Windows":
@@ -260,7 +314,7 @@ def os_name() -> str:
     return f"{platform.system()} {platform.release()}"
 
 
-def r5(runs: list[tuple[str, str]], manifest_doc: dict, bkc_doc: dict | None) -> str:
+def r5(runs: list[tuple[str, str]], manifest_doc: dict, bkc_doc: dict | None, fresh_doc: dict | None) -> str:
     def cmd(*args):
         try:
             return subprocess.run(args, capture_output=True, text=True, check=True).stdout.strip()
@@ -282,6 +336,7 @@ def r5(runs: list[tuple[str, str]], manifest_doc: dict, bkc_doc: dict | None) ->
            f"| Aura image | `{tv.get('aura_image', '?')}` |",
            f"| Datadog snapshot (commit) | {manifest_doc.get('datadog_commit', '?')} |",
            f"| Backstabber snapshot | {(bkc_doc or {}).get('bkc_version', {}).get('git_revision', '—')} |",
+           f"| holdout snapshot (`pypi_malregistry` commit) | {(fresh_doc or {}).get('source', {}).get('commit', '—')} |",
            f"| benign list snapshot | {manifest_doc.get('top_pypi_snapshot', '?')} |",
            "| `jobs` | phylaxis 6, baselines 5 (timings are per package under that concurrency) |"]
     return "\n".join(out)
@@ -289,17 +344,19 @@ def r5(runs: list[tuple[str, str]], manifest_doc: dict, bkc_doc: dict | None) ->
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--runs", nargs="*", default=["=ruleset 2", "-r5=ruleset 5"],
+    p.add_argument("--runs", nargs="*", default=["=ruleset 2", "-r5=ruleset 5", "-r6=ruleset 6"],
                    help="tag=label pairs; a run is reported only if its files exist")
     p.add_argument("--stdout", action="store_true", help="print instead of writing docs/RESULTS.md")
     args = p.parse_args()
     runs = [tuple(x.split("=", 1)) for x in args.runs]
-    runs = [(t, l) for t, l in runs if (RESULTS / f"test-D{t}.jsonl").is_file() or (RESULTS / f"bkc-D{t}.jsonl").is_file()]
+    runs = [(t, l) for t, l in runs if any((RESULTS / f"{sp}-D{t}.jsonl").is_file() for sp in ("test", "bkc", "fresh"))]
 
     manifest_doc = json.loads((HERE / "manifest.json").read_text(encoding="utf-8"))
     bkc_path = DATA / "bkc-manifest.json"
     bkc_doc = json.loads(bkc_path.read_text(encoding="utf-8")) if bkc_path.is_file() else None
     bkc = bkc_doc["entries"] if bkc_doc else None
+    fresh_path = DATA / "fresh-manifest.json"
+    fresh_doc = json.loads(fresh_path.read_text(encoding="utf-8")) if fresh_path.is_file() else None
 
     old = DOC.read_text(encoding="utf-8") if DOC.is_file() else ""
     log = old[old.index("## Run log"):].rstrip() if "## Run log" in old else "## Run log"
@@ -310,9 +367,11 @@ def main() -> None:
         "`python eval/report.py`. Only the run log at the end is written by hand. An errored or "
         "unscanned input counts as not flagged for every tool. Ruleset 3 was shaped by the "
         "test-set error analysis (ADR-028), so its test-set rows are post-hoc and stand beside "
-        "ruleset 2's; its honest measurement is R6 `new`.",
+        "ruleset 2's; its honest measurement is R6 `new`. Ruleset 6 was shaped by reading "
+        "Backstabber packages (ADR-031), so for ruleset 6 both the test set and R6 are post-hoc, "
+        "and its honest measurement is the holdout, R7.",
         "", r0(manifest_doc["entries"], bkc), "", r1_r2(runs), "", r3(runs), "", r4(runs), "",
-        r6(runs, bkc), "", r5(runs, manifest_doc, bkc_doc), "", log, "",
+        r6(runs, bkc), "", r7(runs, fresh_doc), "", r8(runs), "", r5(runs, manifest_doc, bkc_doc, fresh_doc), "", log, "",
     ]
     text = "\n".join(x for x in parts if x is not None)
     if args.stdout:
