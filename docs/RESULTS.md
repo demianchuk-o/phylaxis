@@ -18,6 +18,8 @@ Backstabber overlap with the main manifest (counted entries): `datadog-dev` 5, `
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | phylaxis D (ruleset 2) | 0.40 | 2095 | 980 | 1697 | 204 | 398 | 776 | 0.893 | 0.810 | 0.849 | 208.2 | 221.7 / 5.75 | 47 | 40 | 2954 |
 | phylaxis D (ruleset 2) | 0.70 | 2095 | 980 | 665 | 46 | 1430 | 934 | 0.935 | 0.317 | 0.474 | 46.9 | 221.7 / 5.75 | 47 | 40 | 2954 |
+| phylaxis D (ruleset 5) | 0.40 | 2095 | 980 | 1817 | 207 | 278 | 773 | 0.898 | 0.867 | 0.882 | 211.2 | 219.5 / 5.90 | 47 | 34 | 2918 |
+| phylaxis D (ruleset 5) | 0.70 | 2095 | 980 | 827 | 51 | 1268 | 929 | 0.942 | 0.395 | 0.556 | 52.0 | 219.5 / 5.90 | 47 | 34 | 2918 |
 | GuardDog | any rule | 2095 | 980 | 2034 | 844 | 61 | 136 | 0.707 | 0.971 | 0.818 | 861.2 | — | 5 | 1059 | 5773 |
 | Aura | score > 0 | 2095 | 980 | 1881 | 628 | 214 | 352 | 0.750 | 0.898 | 0.817 | 640.8 | — | 95 | 3436 | 151247 |
 
@@ -42,6 +44,12 @@ Aura over its own score (the curve EVALUATION.md §5 asks for):
 | D reachability + phase (ruleset 2) | 0.40 | 2095 | 980 | 1697 | 204 | 398 | 776 | 0.893 | 0.810 | 0.849 | 208.2 | 221.7 / 5.75 | 47 | 40 | 2954 |
 | Δ A→D (ruleset 2) | | | | -73 | -229 | +73 | +229 | +0.089 | -0.035 | +0.026 | -233.7 | | | | |
 | Δ C→D (ruleset 2) | | | | +0 | -53 | +0 | +53 | +0.024 | +0.000 | +0.011 | -54.1 | | | | |
+| A file co-occurrence (ruleset 5) | 0.40 | 2095 | 980 | 1868 | 481 | 227 | 499 | 0.795 | 0.892 | 0.841 | 490.8 | 25.3 / 24.96 | 47 | 33 | 2617 |
+| B definition co-occurrence (ruleset 5) | 0.40 | 2095 | 980 | 1743 | 222 | 352 | 758 | 0.887 | 0.832 | 0.859 | 226.5 | 1.2 / 1.19 | 47 | 33 | 2760 |
+| C reachability, no phase (ruleset 5) | 0.40 | 2095 | 980 | 1825 | 263 | 270 | 717 | 0.874 | 0.871 | 0.873 | 268.4 | 219.5 / 5.90 | 47 | 33 | 2680 |
+| D reachability + phase (ruleset 5) | 0.40 | 2095 | 980 | 1817 | 207 | 278 | 773 | 0.898 | 0.867 | 0.882 | 211.2 | 219.5 / 5.90 | 47 | 34 | 2918 |
+| Δ A→D (ruleset 5) | | | | -51 | -274 | +51 | +274 | +0.102 | -0.024 | +0.042 | -279.6 | | | | |
+| Δ C→D (ruleset 5) | | | | -8 | -56 | +8 | +56 | +0.024 | -0.004 | +0.010 | -57.1 | | | | |
 
 ## R2 Ablation, τ = 0.70
 
@@ -53,6 +61,12 @@ Aura over its own score (the curve EVALUATION.md §5 asks for):
 | D reachability + phase (ruleset 2) | 0.70 | 2095 | 980 | 665 | 46 | 1430 | 934 | 0.935 | 0.317 | 0.474 | 46.9 | 221.7 / 5.75 | 47 | 40 | 2954 |
 | Δ A→D (ruleset 2) | | | | -218 | -56 | +218 | +56 | +0.039 | -0.104 | -0.099 | -57.1 | | | | |
 | Δ C→D (ruleset 2) | | | | -102 | -96 | +102 | +96 | +0.092 | -0.049 | -0.037 | -98.0 | | | | |
+| A file co-occurrence (ruleset 5) | 0.70 | 2095 | 980 | 1021 | 124 | 1074 | 856 | 0.892 | 0.487 | 0.630 | 126.5 | 25.3 / 24.96 | 47 | 33 | 2617 |
+| B definition co-occurrence (ruleset 5) | 0.70 | 2095 | 980 | 928 | 58 | 1167 | 922 | 0.941 | 0.443 | 0.602 | 59.2 | 1.2 / 1.19 | 47 | 33 | 2760 |
+| C reachability, no phase (ruleset 5) | 0.70 | 2095 | 980 | 951 | 149 | 1144 | 831 | 0.865 | 0.454 | 0.595 | 152.0 | 219.5 / 5.90 | 47 | 33 | 2680 |
+| D reachability + phase (ruleset 5) | 0.70 | 2095 | 980 | 827 | 51 | 1268 | 929 | 0.942 | 0.395 | 0.556 | 52.0 | 219.5 / 5.90 | 47 | 34 | 2918 |
+| Δ A→D (ruleset 5) | | | | -194 | -73 | +194 | +73 | +0.050 | -0.093 | -0.074 | -74.5 | | | | |
+| Δ C→D (ruleset 5) | | | | -124 | -98 | +124 | +98 | +0.077 | -0.059 | -0.039 | -100.0 | | | | |
 
 ## R3 Per rule (mode D, τ = 0.40; packages flagged at that point, each counted once per rule by its best path)
 
@@ -76,6 +90,26 @@ Aura over its own score (the curve EVALUATION.md §5 asks for):
 | PHX-INS-002 | 1241 | 97 | 1.00 | 1338 / 0 / 0 |
 | PHX-INS-003 | 2 | 0 | 1.00 | 2 / 0 / 0 |
 
+**ruleset 5**
+
+| rule | TP packages | FP packages | median confidence | phase split (Install / Import / Runtime) |
+|---|---|---|---|---|
+| PHX-EXF-001 | 101 | 81 | 1.00 | 79 / 29 / 74 |
+| PHX-EXF-002 | 30 | 10 | 1.00 | 1 / 26 / 13 |
+| PHX-EXF-003 | 418 | 47 | 1.00 | 355 / 23 / 87 |
+| PHX-EXF-004 | 0 | 2 | 0.60 | 1 / 0 / 1 |
+| PHX-DRP-001 | 78 | 50 | 1.00 | 31 / 60 / 37 |
+| PHX-DRP-002 | 20 | 35 | 0.60 | 24 / 13 / 18 |
+| PHX-DRP-003 | 188 | 106 | 1.00 | 147 / 60 / 87 |
+| PHX-OBF-001 | 268 | 14 | 1.00 | 159 / 90 / 33 |
+| PHX-OBF-002 | 1 | 10 | 0.60 | 6 / 2 / 3 |
+| PHX-BKD-001 | 21 | 6 | 1.00 | 9 / 12 / 6 |
+| PHX-PER-001 | 1 | 3 | 0.60 | 0 / 2 / 2 |
+| PHX-SAB-001 | 35 | 76 | 0.60 | 29 / 37 / 45 |
+| PHX-INS-001 | 594 | 22 | 1.00 | 616 / 0 / 0 |
+| PHX-INS-002 | 1241 | 97 | 1.00 | 1338 / 0 / 0 |
+| PHX-INS-003 | 2 | 0 | 1.00 | 2 / 0 / 0 |
+
 ## R4 Error analysis
 
 The mechanical split of the misses comes from the rows; the classification by cause (EVALUATION.md §7: out-of-scope, parse-failure, rule-gap, resolution-gap, fold-gap, label-noise) is done by reading samples, and ADR-028 records the first pass.
@@ -83,6 +117,7 @@ The mechanical split of the misses comes from the rows; the classification by ca
 | ruleset | missed at τ 0.40 | no finding at all | found, below τ | errored / not scanned |
 |---|---|---|---|---|
 | ruleset 2 | 398 | 382 | 0 | 16 |
+| ruleset 5 | 278 | 254 | 8 | 16 |
 
 ## R6 Backstabber split (ADR-026): recall only
 
@@ -90,7 +125,16 @@ Every entry is malicious. `new` is the packages no earlier run has seen; `all` a
 
 | tool / config | τ | recall `new` | recall `all` | N `new` | N `all` | errors |
 |---|---|---|---|---|---|---|
+| A file co-occurrence (ruleset 5) | 0.40 | 0.788 | 0.795 | 5289 | 6041 | 38 |
+| A file co-occurrence (ruleset 5) | 0.70 | 0.433 | 0.422 | 5289 | 6041 | 38 |
+| B definition co-occurrence (ruleset 5) | 0.40 | 0.667 | 0.677 | 5289 | 6041 | 38 |
+| B definition co-occurrence (ruleset 5) | 0.70 | 0.383 | 0.374 | 5289 | 6041 | 38 |
+| C reachability, no phase (ruleset 5) | 0.40 | 0.689 | 0.701 | 5289 | 6041 | 38 |
+| C reachability, no phase (ruleset 5) | 0.70 | 0.350 | 0.350 | 5289 | 6041 | 38 |
+| D reachability + phase (ruleset 5) | 0.40 | 0.682 | 0.693 | 5289 | 6041 | 38 |
+| D reachability + phase (ruleset 5) | 0.70 | 0.227 | 0.232 | 5289 | 6041 | 38 |
 | GuardDog | any rule | 0.804 | 0.821 | 5289 | 6041 | 0 |
+| Aura | score > 0 | 0.798 | 0.808 | 5289 | 6041 | 41 |
 
 ## R5 Environment
 
@@ -99,8 +143,8 @@ Every entry is malicious. `new` is the packages no earlier run has seen; `all` a
 | generated | 2026-10-09 by `eval/report.py` |
 | OS / CPU | Windows 11 (build 26300) / AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD |
 | rustc | rustc 1.96.0 (ac68faa20 2026-05-25) |
-| phylaxis commit (report generated at) | 6ea7cdf |
-| rulesets reported | ruleset 2 |
+| phylaxis commit (report generated at) | be6ee54 |
+| rulesets reported | ruleset 2, ruleset 5 |
 | GuardDog version | 3.2.0 |
 | Aura image | `sourcecodeai/aura:dev@sha256:2f5cb08039ef9aca1ff29ff853537fa87c27fba3184f223437976e28e5ff67ad` |
 | Datadog snapshot (commit) | a4d6fc95e3a03f12b58775e9925fa391125dfa2d |
