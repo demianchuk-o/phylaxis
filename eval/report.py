@@ -254,21 +254,25 @@ def r6(runs: list[tuple[str, str]], bkc: list[dict] | None) -> str:
 def r7(runs: list[tuple[str, str]], fresh_doc: dict | None) -> str:
     if fresh_doc is None:
         return ""
-    ids = {e["id"] for e in fresh_doc["entries"] if e.get("split") == "fresh"}
+    fresh = [e for e in fresh_doc["entries"] if e.get("split") == "fresh"]
+    ids = {e["id"] for e in fresh}
+    n_mal = sum(e["label"] == "malicious" for e in fresh)
+    n_ben = len(fresh) - n_mal
     src = fresh_doc["source"]
-    out = ["## R7 Holdout split `fresh` (ADR-031): recall only", "",
-           f"{len(ids)} malicious sdists from `{src['repo']}` at `{src['commit'][:10]}`, drawn before "
+    ben = fresh_doc.get("benign") or {}
+    benign_text = (f" The benign half is {n_ben} sdists of the next PyPI projects down the same "
+                   f"ranking snapshot (ranks {ben['ranks'][0]}–{ben['ranks'][1]}), downloaded "
+                   f"{ben['downloaded']}, never read either." if n_ben and ben.get("ranks") else
+                   " There is no benign half yet: precision and FP/1k are not meaningful here.")
+    out = ["## R7 Holdout split `fresh` (ADR-031)", "",
+           f"{n_mal} malicious sdists from `{src['repo']}` at `{src['commit'][:10]}`, drawn before "
            "ruleset 6 was built from the (name, version) pairs absent from Datadog and Backstabber, "
-           "one version per name, deduplicated by content against both. No ruleset was shaped by "
-           "it, so every row here is unseen data. False positives are not measurable on an "
-           "all-malicious set; for them see R1 (ruleset 6 left the benign test rows at τ = 0.40 "
-           "unchanged, ADR-031).", "",
-           "| tool / config | τ | recall | N | errors |", "|---|---|---|---|---|"]
+           "one version per name, deduplicated by content against both." + benign_text +
+           " No ruleset was shaped by any of it: every row here is unseen data.", "", R1_HEAD]
 
     def line(label, tau, rs, flag):
         rs = [r for r in rs if r["id"] in ids]
-        rec = sum(map(flag, rs)) / len(rs) if rs else 0.0
-        return f"| {label} | {tau} | {fmt(rec)} | {len(rs)} | {sum(map(errored, rs))} |"
+        return r1_line(label, tau, confusion(rs, flag), "—")
 
     for tag, label in runs:
         for m, name in MODES.items():
@@ -282,6 +286,18 @@ def r7(runs: list[tuple[str, str]], fresh_doc: dict | None) -> str:
     a = rows("fresh-aura")
     if a:
         out.append(line("Aura", "score > 0", a, aura_flag(0)))
+    # Skips count as not flagged, which favours phylaxis on the benign half against a tool
+    # that scanned them; the bound below says by how much at most.
+    for tag, label in runs[-1:]:
+        rs = [r for r in rows(f"fresh-D{tag}") or [] if r["id"] in ids]
+        c = confusion(rs, phylaxis_flag(0.40))
+        skipped_benign = sum(errored(r) for r in rs if r["label"] == "benign")
+        if c["n_ben"]:
+            out += ["", f"phylaxis errors are almost all skips (no Python source, over the size limit, "
+                    f"archive entries the safe extractor refuses), identical across A–D. Worst case for "
+                    f"D ({label}) at τ = 0.40: if all {skipped_benign} skipped benign packages counted as "
+                    f"false positives, FP/1k would be {(c['fp'] + skipped_benign) * 1000 / c['n_ben']:.1f} "
+                    f"instead of {c['fp1k']:.1f}."]
     return "\n".join(out)
 
 

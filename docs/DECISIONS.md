@@ -1494,7 +1494,20 @@ al., 2023) at commit `5f2592d`, sampled (one version per name, seed 20261010) fr
 version) pairs absent from both earlier collections and deduplicated by content against them
 (`eval/manifest_fresh.py`). It was drawn and frozen before ruleset 6 was built, and nothing was
 scanned on it before then. Datadog had added no PyPI samples since the manifest commit, which
-is why the holdout is not Datadog's.
+is why the holdout is not Datadog's. Its benign half is the next 1 000 sdists down the same
+PyPI ranking snapshot (ranks 1 051–2 102, `eval/manifest_fresh_benign.py`), equally unread.
+
+**Measured on the holdout (RESULTS R7), τ = 0.40.** Ruleset 6 moves D's recall from 0.955 to
+0.957 and its false positives not at all (157 per 1 000 benign). The fixes target idioms that
+Backstabber's campaigns use and this sample mostly does not, so on unseen data they are a small
+gain. Ruleset 6's real value is that it closes gaps at no cost in precision, not that it changes
+the headline. The headline, on data no ruleset was shaped by:
+
+| | recall | FP/1k | precision |
+|---|---|---|---|
+| D, ruleset 6 | 0.957 | 157 | 0.919 |
+| A, file co-occurrence | 0.966 | 366 | 0.832 |
+| GuardDog | 0.959 | 817 | 0.687 |
 
 ---
 
