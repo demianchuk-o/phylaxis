@@ -10,6 +10,7 @@ pub mod args;
 pub mod output;
 pub mod project;
 pub mod scan;
+pub mod snippets;
 
 pub use args::{Cli, Command, ProjectArgs, ScanArgs};
 pub use output::Format;
@@ -102,7 +103,11 @@ fn scan_command(args: &ScanArgs) -> i32 {
                 continue;
             }
         };
-        match output::render(&report, args.format) {
+        let rendered = match args.format {
+            Format::Text => Ok(output::to_text(&report, !args.no_code)),
+            f => output::render(&report, f),
+        };
+        match rendered {
             // Text already ends in a newline, so `println!` leaves the blank separator line.
             Ok(s) => println!("{s}"),
             Err(e) => {

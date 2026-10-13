@@ -275,7 +275,8 @@ fn analyse(
         .collect::<Result<Vec<_>, _>>()?;
     let meta = project_meta(&tree);
     let pg = phylaxis_graph::build_package_graph(&asts, &meta)?;
-    let findings = phylaxis_rules::evaluate(&pg, opts)?;
+    let mut findings = phylaxis_rules::evaluate(&pg, opts)?;
+    crate::snippets::attach(&mut findings, &asts);
     let (risk, verdict) = phylaxis_rules::score_package(&findings);
 
     let stats = ScanStats {

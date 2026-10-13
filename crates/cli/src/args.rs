@@ -170,6 +170,10 @@ pub struct ScanArgs {
     #[arg(long, value_enum, default_value_t = Format::Json)]
     pub format: Format,
 
+    /// Text format: one row per path step with `file:line:col` instead of the source lines.
+    #[arg(long)]
+    pub no_code: bool,
+
     /// Analysis configuration (ablation); D is the full method.
     #[arg(long, value_enum, default_value_t = ModeArg::D)]
     pub mode: ModeArg,

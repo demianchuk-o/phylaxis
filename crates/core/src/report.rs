@@ -12,9 +12,12 @@ use crate::cache_key::RulesetVersion;
 use crate::finding::{Finding, RiskScore, Verdict};
 use crate::package::Distribution;
 
-/// Bumped on any change to the JSON shape. Folded into the cache key via the ruleset
-/// version convention (ADR-017), emitted here for consumers.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Bumped on any change to the JSON shape, or to what an existing field carries. Part of
+/// the cache key (ADR-017, ADR-032), emitted here for consumers.
+///
+/// 2: `evidence.snippets` is filled (ADR-033). A cached version-1 report has it empty and
+/// would render without code, so it must miss rather than be served.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The decision predicate in use (EVALUATION.md §6). Only the ablation harness changes
 /// it; the default is the full method.
@@ -157,7 +160,7 @@ mod tests {
         let back: ScanReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
         assert!(!back.is_flagged());
-        assert!(json.contains("\"schema_version\":1"));
+        assert!(json.contains(&format!("\"schema_version\":{SCHEMA_VERSION}")));
     }
 
     #[test]

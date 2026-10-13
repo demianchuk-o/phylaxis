@@ -1589,6 +1589,75 @@ The cache key layout changes (ADR-017 amended), which empties old caches once.
 
 ---
 
+## ADR-033 — Evidence carries its code; text shows the path as code
+
+**Date:** 2026-10-13. **Status:** accepted.
+
+### Context
+
+A finding's path was rendered as locations, one row per step: `transfer setup.py:68:11
+response`. That is complete, and it is unreadable without the file open beside it. A finding
+claims that these lines are connected, and the reader could not see the lines. A
+co-occurrence scanner that prints a few lines of code around one hit reads better than a
+reachability path that prints none, even though the path is the stronger evidence.
+
+`Evidence::snippets` has been in the schema since ADR-009 and was always empty (open request
+of 2026-09-24, item 3). The graph holds spans, not text, and for an sdist the extracted tree
+is deleted before anything is rendered.
+
+### Choice
+
+- **Snippets are cut in the scan, after the rules and before the tree is dropped.** There is
+  one per distinct (file, line) on the path, in the order the path first reaches it. Each is
+  the line without its terminator or trailing whitespace, indentation kept, its content cut at
+  120 characters and marked with `…`. The cap bounds what a hundred-kilobyte minified line
+  costs every finding that passes through it.
+- **`--format text` prints the code by default.** The file is named once, then there is one
+  row per line: `<kind> <line> │ <code>`.
+  - Consecutive steps on the same line merge into one row. The row is labelled by the step
+    that matters most there: source and sink, then call and return, then transform, then
+    transfer. A sink never merges into its own source.
+  - The gutter is `⋮` instead of `│` where the path skips lines, so a gap costs no extra row.
+  - The indentation shared by each run of rows in one file is removed.
+  - `--no-code` restores one row per step with `file:line:col`.
+- **Everything from the package is escaped before it reaches the terminal.** Code, symbols,
+  file names and messages pass through `output::terminal_safe`. Control characters and the
+  Unicode bidirectional controls are printed as escapes (`\u{1b}`, `\u{202e}`).
+  - The package's author chose those bytes. An escape sequence can rewrite what the terminal
+    shows, and a bidi override can reorder a line without changing its bytes (Boucher and
+    Anderson, 2021).
+  - JSON keeps the text as it is: JSON escaping already makes it inert, and a consumer may
+    want the original.
+- **`SCHEMA_VERSION` 1 → 2.** The JSON shape is unchanged, but what `snippets` carries is not,
+  and a report cached before this change would render without code. The schema is in the
+  cache key (ADR-032), so old entries miss once.
+
+### Alternatives considered
+
+- **The renderer reads the files back.** This works for a directory but not for an sdist,
+  whose tree is gone, and the same report would render differently depending on what is on
+  disk at the time. Rejected.
+- **Keep the text for rendering only, outside the report.** A cache hit would have no text,
+  and the Python API and a future SARIF output would each need their own way to get it.
+  Rejected: the report is the one schema (ADR-013).
+- **Print a line of context above and below each step.** This doubles the height of every
+  finding with lines the path does not pass through. Rejected: the path's own lines are what
+  the reader needs.
+
+### Consequences
+
+Not an analysis change: no finding, score or verdict changes, so `RULESET_VERSION` stays 6
+and every evaluation number stands.
+
+Reports grow by one short string per distinct line on a path. Measured on the largest report
+in the test set, `litellm` 1.82.7 (37 617 findings): JSON 255 → 416 MB, scan time +5 %, peak
+memory +30 %. On an ordinary package the growth is a few kilobytes (`locust` 2.46.7 in mode
+A: 3.9 → 5.7 kB). A report-level table of lines that findings point into would remove the
+repetition, at the cost of a JSON shape change; not done, since the size was already the
+problem of that one report before snippets existed.
+
+---
+
 ## Open requests
 
 Implementers append here. Format: date, who, what rule is missing, what conservative reading
@@ -1698,8 +1767,9 @@ was applied meanwhile.
      `write_text` writes to, and `find_sinks` matches callee names only. PHX-PER-001 cannot
      fire until they are matched the way `SensitiveFile` is. `winreg.SetValueEx` is the
      only persistence sink that works.
-  3. **Evidence snippets are empty.** The package graph carries spans, not source text; the
-     CLI holds the files and is the natural place to cut them.
+  3. *(closed 2026-10-13, ADR-033)* **Evidence snippets are empty.** The package graph
+     carries spans, not source text; the CLI holds the files and is the natural place to cut
+     them.
 
   **The conservative reading applied meanwhile:** (1) matches RULES.md's formal row and fails
   toward silence on install-time environment reads, which INS-001 and EXF-001 still catch when

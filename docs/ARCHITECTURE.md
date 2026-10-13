@@ -30,9 +30,9 @@ package code is ever executed, and nothing in the package can cause a network re
 | 9 | Reachability | `graph` | queries → `Vec<ReachabilityPath>` | Data paths (DFG) and control paths (CG); deterministic order. |
 | 10 | Rules | `rules` | `PackageGraph + Catalogue` → `Vec<Finding>` | RULES.md; one query per rule; confidence and phase attached. |
 | 11 | Score | `rules` | `[Finding]` → `RiskScore`, `Verdict` | ADR-010. |
-| 12 | Report | `core` | everything → `ScanReport` | Serialisable, versioned schema. |
+| 12 | Report | `core`, `cli` | everything → `ScanReport` | Serialisable, versioned schema. Each finding carries the source line behind every step of its path, cut while the files are still on disk (ADR-033). |
 | 13 | Cache store | `cache` | `CacheKey + ScanReport` → () | Never overwritten. At the end of a run, one write records which entries were used and drops the stale and the long-unused (ADR-032). |
-| 14 | Output | `cli` | `ScanReport` → json / sarif / text; exit code | Same code path for binary and Python (`run()`). |
+| 14 | Output | `cli` | `ScanReport` → json / sarif / text; exit code | Same code path for binary and Python (`run()`). Text shows each path as the code it runs through, escaped for the terminal (ADR-033). |
 | 15 | Python API | `py` | path(s) → JSON string → dict in the shim | ADR-013; `scan_many` releases the GIL and uses `rayon` across packages. |
 
 Stages 5–9 are the analysis proper and carry the design weight; the rest is orchestration.
